@@ -65,6 +65,49 @@ public class PlaylistManager {
             });
     }
 
+    /**
+     * Imports all songs from a playlist/album URL into a named playlist.
+     * Resolves each track URL in the background and sends progress feedback.
+     */
+    public void importPlaylistAsync(String playlistUrl, ServerPlayerEntity requester,
+                                    java.util.function.Consumer<String> onStatus) {
+        onStatus.accept("\u23f3 Fetching playlist info\u2026");
+        CompletableFuture.supplyAsync(() -> {
+            MusicConfig cfg = MusicConfig.get();
+            // Get the playlist title for the new playlist name
+            String playlistName = LinkResolver.get().getPlaylistTitle(playlistUrl, cfg);
+            List<String> trackUrls = LinkResolver.get().extractPlaylistUrls(playlistUrl, cfg);
+            return new Object[]{ playlistName, trackUrls };
+        }).thenAccept(result -> {
+            String playlistName = (String) result[0];
+            @SuppressWarnings("unchecked")
+            List<String> trackUrls = (List<String>) result[1];
+
+            if (trackUrls.isEmpty()) {
+                onStatus.accept("\u26a0 No tracks found in playlist. Check the URL or credentials.");
+                return;
+            }
+
+            // Create or reuse the playlist
+            createPlaylist(playlistName);
+            onStatus.accept("\u23f3 Importing " + trackUrls.size() + " tracks into \u201c" + playlistName + "\u201d\u2026");
+
+            // Add all songs — each resolves in its own thread
+            int[] counter = {0};
+            int total = trackUrls.size();
+            for (String trackUrl : trackUrls) {
+                addSongAsync(trackUrl, playlistName, requester, msg -> {
+                    counter[0]++;
+                    if (counter[0] == total) {
+                        onStatus.accept("\u2714 Import complete: " + total + " tracks added to \u201c" + playlistName + "\u201d");
+                        if (requester != null && requester.networkHandler != null)
+                            syncToPlayer(requester);
+                    }
+                });
+            }
+        });
+    }
+
     public boolean removeSong(String name) {
         boolean ok = library.remove(name.toLowerCase()) != null;
         if (ok) { playlists.values().forEach(pl -> pl.removeSong(name)); save(); }

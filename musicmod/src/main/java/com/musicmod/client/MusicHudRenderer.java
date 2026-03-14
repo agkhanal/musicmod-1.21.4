@@ -60,12 +60,18 @@ public class MusicHudRenderer {
         if (a <= 0) return;
 
         MusicPlayer player = MusicPlayer.get();
-        int elapsed  = player.getElapsedSeconds();
         int duration = player.getDurationSeconds();
+        int elapsed  = duration > 0
+                ? Math.min(player.getElapsedSeconds(), duration)
+                : player.getElapsedSeconds();
         boolean hasDuration = duration > 0;
 
-        String line1 = "\u266a " + songName;
+        // Clamp HUD width to 220px max so long song names don't overflow screen
+        final int MAX_TEXT_W = 220;
+        String rawLine1 = "\u266a " + songName;
+        String line1 = truncate(mc, rawLine1, MAX_TEXT_W);
         String line2 = playlistName.isEmpty() ? "" : "Playlist: " + playlistName;
+        if (!line2.isEmpty()) line2 = truncate(mc, line2, MAX_TEXT_W);
         String line3 = formatProgress(elapsed, duration, player.isPaused());
 
         int textW = mc.textRenderer.getWidth(line1);
@@ -120,6 +126,14 @@ public class MusicHudRenderer {
             ctx.fill(x - 2, ty, x + barW - 2, ty + 3, (a << 24) | 0x333333);
             ctx.fill(x - 2, ty, x - 2 + filledW, ty + 3, (a << 24) | 0x55FF55);
         }
+    }
+
+    private static String truncate(MinecraftClient mc, String text, int maxPx) {
+        if (mc.textRenderer.getWidth(text) <= maxPx) return text;
+        String ellipsis = "...";
+        while (!text.isEmpty() && mc.textRenderer.getWidth(text + ellipsis) > maxPx)
+            text = text.substring(0, text.length() - 1);
+        return text + ellipsis;
     }
 
     private static String formatProgress(int elapsed, int duration, boolean paused) {

@@ -7,7 +7,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.net.*;
-import java.net.http.*;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
@@ -235,68 +234,30 @@ public class LinkResolver {
     // ── Spotify → YouTube ─────────────────────────────────────────────────────
 
     private String resolveSpotifyToYoutube(String spotifyUrl, MusicConfig cfg) throws Exception {
-        if (cfg.hasSpotifyCredentials()) {
-            // Use Spotify API
-            String trackId = extractSpotifyTrackId(spotifyUrl);
-            if (trackId != null) {
-                SpotifyTrackInfo info = fetchSpotifyTrackInfo(trackId, cfg);
-                if (info != null) {
-                    return searchYouTube(info.artist + " - " + info.title, cfg);
-                }
-            }
-        }
-
-        // Fallback: use Spotify oEmbed API (no credentials required) to get title
-        String oembedTitle = fetchSpotifyTitleFromOembed(spotifyUrl);
-        if (oembedTitle != null && !oembedTitle.isBlank()) {
-            LOGGER.info("Got Spotify title via oEmbed: {}", oembedTitle);
-            String ytUrl = searchYouTube(oembedTitle, cfg);
-            if (ytUrl != null) return ytUrl;
-        }
-
-        // Last resort: try yt-dlp directly on the Spotify URL
-        // (works for Spotify podcast episodes and sometimes previews)
-        LOGGER.warn("Trying yt-dlp directly on Spotify URL (may fail for full tracks): {}", spotifyUrl);
-        return spotifyUrl;
-    }
-
-    /**
-     * Fetch track title from Spotify's public oEmbed endpoint.
-     * Returns "Artist - Title" format or just title. No credentials required.
-     */
-    private String fetchSpotifyTitleFromOembed(String spotifyUrl) {
-        try {
-            String encodedUrl = URLEncoder.encode(spotifyUrl, "UTF-8");
-            URL apiUrl = new URL("https://open.spotify.com/oembed?url=" + encodedUrl);
-            HttpURLConnection conn = (HttpURLConnection) apiUrl.openConnection();
-            conn.setConnectTimeout(8000);
-            conn.setReadTimeout(8000);
-            conn.setRequestProperty("User-Agent", "MinecraftMusicMod/1.0");
-            if (conn.getResponseCode() != 200) return null;
-            String json = new String(conn.getInputStream().readAllBytes());
-            // oEmbed returns {"title": "Artist Name - Track Name", ...}
-            return extractJsonField(json, "title");
-        } catch (Exception e) {
-            LOGGER.warn("Spotify oEmbed lookup failed: {}", e.getMessage());
+        if (!cfg.hasSpotifyCredentials()) {
+            LOGGER.error("Spotify credentials are required to play Spotify links. " +
+                    "Set spotifyClientId and spotifyClientSecret in musicmod_config.json.");
             return null;
         }
+
+        String trackId = extractSpotifyTrackId(spotifyUrl);
+        if (trackId == null) {
+            LOGGER.error("Could not extract Spotify track ID from: {}", spotifyUrl);
+            return null;
+        }
+        SpotifyTrackInfo info = fetchSpotifyTrackInfo(trackId, cfg);
+        if (info == null) {
+            LOGGER.error("Spotify API returned no info for track: {}", trackId);
+            return null;
+        }
+        return searchYouTube(info.artist + " - " + info.title, cfg);
     }
 
     private static class SpotifyTrackInfo { String title, artist; }
 
     private SpotifyTrackInfo fetchSpotifyTrackInfo(String trackId, MusicConfig cfg) {
         try {
-            String credentials = cfg.spotifyClientId + ":" + cfg.spotifyClientSecret;
-            String encoded = Base64.getEncoder().encodeToString(credentials.getBytes());
-            HttpURLConnection tokenConn = (HttpURLConnection)
-                    new URL("https://accounts.spotify.com/api/token").openConnection();
-            tokenConn.setRequestMethod("POST");
-            tokenConn.setDoOutput(true);
-            tokenConn.setRequestProperty("Authorization", "Basic " + encoded);
-            tokenConn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-            tokenConn.getOutputStream().write("grant_type=client_credentials".getBytes());
-            String tokenJson = new String(tokenConn.getInputStream().readAllBytes());
-            String accessToken = extractJsonField(tokenJson, "access_token");
+            String accessToken = getSpotifyAccessToken(cfg);
             if (accessToken == null) return null;
 
             HttpURLConnection trackConn = (HttpURLConnection)
@@ -341,6 +302,221 @@ public class LinkResolver {
         if (!finished) { proc.destroyForcibly(); return null; }
         reader.join(1000);
         return out.toString().trim();
+    }
+
+    // ── Playlist detection & extraction ───────────────────────────────────────
+
+    /**
+     * Returns true if the URL points to a playlist/album rather than a single track.
+     * Supports: YouTube playlists, Spotify playlists/albums, SoundCloud sets.
+     */
+    public static boolean isPlaylistUrl(String url) {
+        if (url == null) return false;
+        if (url.contains("youtube.com") || url.contains("youtu.be")) {
+            return url.contains("list=") && !url.contains("/watch?");
+        }
+        if (url.contains("spotify.com")) {
+            try {
+                String path = new URL(url).getPath();
+                return path.startsWith("/playlist/") || path.startsWith("/album/");
+            } catch (Exception e) { return false; }
+        }
+        if (url.contains("soundcloud.com")) {
+            try {
+                String path = new URL(url).getPath();
+                String[] parts = path.split("/");
+                // SoundCloud sets: soundcloud.com/artist/sets/setname
+                return path.contains("/sets/") && parts.length >= 4;
+            } catch (Exception e) { return false; }
+        }
+        return false;
+    }
+
+    /**
+     * Extracts individual track URLs from a playlist URL.
+     * For YouTube/SoundCloud: uses yt-dlp --flat-playlist --get-url.
+     * For Spotify: uses the Spotify Web API (credentials required).
+     *
+     * @return list of individual track URLs, empty on failure.
+     */
+    public List<String> extractPlaylistUrls(String url, MusicConfig cfg) {
+        if (url.contains("spotify.com")) {
+            return extractSpotifyPlaylistUrls(url, cfg);
+        }
+        // YouTube and SoundCloud: yt-dlp handles flat playlist extraction natively
+        try {
+            List<String> cmd = List.of(cfg.ytDlpPath,
+                    "--flat-playlist", "--get-url", "--no-warnings", url);
+            String output = runProcess(cmd, cfg.resolveTimeoutSeconds * 10);
+            if (output == null || output.isBlank()) return List.of();
+            List<String> urls = new ArrayList<>();
+            for (String line : output.split("\n")) {
+                String trimmed = line.trim();
+                if (!trimmed.isEmpty()) urls.add(trimmed);
+            }
+            return urls;
+        } catch (Exception e) {
+            LOGGER.error("Failed to extract playlist URLs from {}: {}", url, e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * Fetches a display name for a playlist/album URL (for creating the playlist).
+     * For YouTube/SoundCloud: uses yt-dlp --get-filename with playlist title.
+     * For Spotify: uses the Spotify API.
+     */
+    public String getPlaylistTitle(String url, MusicConfig cfg) {
+        if (url.contains("spotify.com")) {
+            return getSpotifyCollectionTitle(url, cfg);
+        }
+        try {
+            List<String> cmd = List.of(cfg.ytDlpPath,
+                    "--flat-playlist", "--print", "playlist_title",
+                    "--no-warnings", "--playlist-items", "1", url);
+            String output = runProcess(cmd, cfg.resolveTimeoutSeconds);
+            if (output != null && !output.isBlank()) {
+                String title = output.split("\n")[0].trim();
+                if (!title.isEmpty() && !title.equals("NA")) return title;
+            }
+        } catch (Exception e) {
+            LOGGER.warn("Could not fetch playlist title: {}", e.getMessage());
+        }
+        // Fallback: derive from URL
+        try {
+            String path = new URL(url).getPath();
+            String last = path.substring(path.lastIndexOf('/') + 1);
+            return last.isEmpty() ? "Imported Playlist" : last;
+        } catch (Exception e) { return "Imported Playlist"; }
+    }
+
+    private List<String> extractSpotifyPlaylistUrls(String url, MusicConfig cfg) {
+        if (!cfg.hasSpotifyCredentials()) {
+            LOGGER.error("Spotify credentials required to import Spotify playlists/albums.");
+            return List.of();
+        }
+        try {
+            String accessToken = getSpotifyAccessToken(cfg);
+            if (accessToken == null) return List.of();
+
+            String path = new URL(url).getPath();
+            String[] parts = path.split("/");
+            if (parts.length < 3) return List.of();
+            String type = parts[1]; // "playlist" or "album"
+            String id   = parts[2].split("\\?")[0];
+
+            String apiBase = "https://api.spotify.com/v1/"
+                    + (type.equals("album") ? "albums/" : "playlists/")
+                    + id + "/tracks?limit=50";
+
+            List<String> trackUrls = new ArrayList<>();
+            String nextUrl = apiBase;
+            while (nextUrl != null) {
+                HttpURLConnection conn = (HttpURLConnection) new URL(nextUrl).openConnection();
+                conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+                conn.setConnectTimeout(8000);
+                conn.setReadTimeout(8000);
+                if (conn.getResponseCode() != 200) break;
+                String json = new String(conn.getInputStream().readAllBytes());
+
+                // Extract track IDs — both playlist items (track.id) and album items (id)
+                int searchFrom = 0;
+                String idKey = type.equals("album") ? "\"id\"" : "\"id\"";
+                // For playlists items contain {"track": {"id": "..."}}; for albums {"id": "..."}
+                // We walk "items" array and extract track IDs
+                int itemsIdx = json.indexOf("\"items\"");
+                if (itemsIdx < 0) break;
+                int arrayStart = json.indexOf('[', itemsIdx);
+                int arrayEnd   = findMatchingBracket(json, arrayStart, '[', ']');
+                String itemsJson = arrayStart >= 0 && arrayEnd > arrayStart
+                        ? json.substring(arrayStart, arrayEnd + 1) : "";
+
+                // Walk items and find each track id
+                int pos = 0;
+                while (pos < itemsJson.length()) {
+                    // For playlists: find "track":{..."id":"..."}
+                    // For albums:    find "id":"..."
+                    int trackId_idx;
+                    if (type.equals("playlist")) {
+                        int trackObj = itemsJson.indexOf("\"track\"", pos);
+                        if (trackObj < 0) break;
+                        trackId_idx = trackObj;
+                    } else {
+                        trackId_idx = pos;
+                    }
+                    String tid = extractJsonField(itemsJson, "id", trackId_idx);
+                    if (tid == null) break;
+                    trackUrls.add("https://open.spotify.com/track/" + tid);
+                    pos = itemsJson.indexOf(tid, trackId_idx) + tid.length();
+                }
+
+                // Pagination
+                String nextField = extractJsonField(json, "next");
+                nextUrl = (nextField != null && !nextField.isEmpty()) ? nextField : null;
+            }
+            return trackUrls;
+        } catch (Exception e) {
+            LOGGER.error("Spotify playlist extraction failed: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    private String getSpotifyCollectionTitle(String url, MusicConfig cfg) {
+        if (!cfg.hasSpotifyCredentials()) return "Spotify Import";
+        try {
+            String accessToken = getSpotifyAccessToken(cfg);
+            if (accessToken == null) return "Spotify Import";
+            String path = new URL(url).getPath();
+            String[] parts = path.split("/");
+            if (parts.length < 3) return "Spotify Import";
+            String type = parts[1];
+            String id   = parts[2].split("\\?")[0];
+            String apiUrl = "https://api.spotify.com/v1/"
+                    + (type.equals("album") ? "albums/" : "playlists/") + id;
+            HttpURLConnection conn = (HttpURLConnection) new URL(apiUrl).openConnection();
+            conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+            conn.setConnectTimeout(8000);
+            conn.setReadTimeout(8000);
+            if (conn.getResponseCode() != 200) return "Spotify Import";
+            String json = new String(conn.getInputStream().readAllBytes());
+            String title = extractJsonField(json, "name");
+            return title != null && !title.isEmpty() ? title : "Spotify Import";
+        } catch (Exception e) {
+            return "Spotify Import";
+        }
+    }
+
+    private String getSpotifyAccessToken(MusicConfig cfg) {
+        try {
+            String credentials = cfg.spotifyClientId + ":" + cfg.spotifyClientSecret;
+            String encoded = Base64.getEncoder().encodeToString(credentials.getBytes());
+            HttpURLConnection conn = (HttpURLConnection)
+                    new URL("https://accounts.spotify.com/api/token").openConnection();
+            conn.setRequestMethod("POST");
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Authorization", "Basic " + encoded);
+            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+            conn.getOutputStream().write("grant_type=client_credentials".getBytes());
+            String tokenJson = new String(conn.getInputStream().readAllBytes());
+            return extractJsonField(tokenJson, "access_token");
+        } catch (Exception e) {
+            LOGGER.error("Failed to get Spotify access token: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /** Find the index of the closing bracket matching the opening bracket at startIdx. */
+    private static int findMatchingBracket(String s, int startIdx, char open, char close) {
+        if (startIdx < 0 || startIdx >= s.length() || s.charAt(startIdx) != open) return -1;
+        int depth = 0;
+        for (int i = startIdx; i < s.length(); i++) {
+            if (s.charAt(i) == open)  depth++;
+            else if (s.charAt(i) == close) {
+                depth--;
+                if (depth == 0) return i;
+            }
+        }
+        return -1;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

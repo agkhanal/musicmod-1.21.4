@@ -50,17 +50,25 @@ public class MusicServerMod implements ModInitializer {
         ServerPlayNetworking.registerGlobalReceiver(MusicPackets.AddSongPayload.ID,
             (payload, context) -> {
                 ServerPlayerEntity player = context.player();
-                context.server().execute(() ->
-                    PlaylistManager.get().addSongAsync(
-                        payload.url(),
-                        payload.playlist().isBlank() ? null : payload.playlist(),
-                        player,
-                        msg -> context.server().execute(() -> {
-                            PlaylistManager.sendFeedback(player, msg);
-                            PlaylistManager.get().syncToPlayer(player);
-                        })
-                    )
-                );
+                context.server().execute(() -> {
+                    String url = payload.url();
+                    if (LinkResolver.isPlaylistUrl(url)) {
+                        // Import entire playlist/album
+                        PlaylistManager.get().importPlaylistAsync(url, player,
+                            msg -> context.server().execute(() ->
+                                PlaylistManager.sendFeedback(player, msg)));
+                    } else {
+                        PlaylistManager.get().addSongAsync(
+                            url,
+                            payload.playlist().isBlank() ? null : payload.playlist(),
+                            player,
+                            msg -> context.server().execute(() -> {
+                                PlaylistManager.sendFeedback(player, msg);
+                                PlaylistManager.get().syncToPlayer(player);
+                            })
+                        );
+                    }
+                });
             });
 
         // ── C2S: playlist actions ─────────────────────────────────────────────────
@@ -162,6 +170,12 @@ public class MusicServerMod implements ModInitializer {
                 boolean ok = pm.removeSong(arg);
                 PlaylistManager.sendFeedback(player, ok ? "\u2714 Removed: " + arg : "\u26a0 Not found.");
                 pm.syncToPlayer(player);
+            }
+
+            case "song_finished" -> {
+                // Client reports natural end of song — advance playlist or stop
+                if (c.getActivePlaylist() != null) c.skipSong();
+                else c.stopAll();
             }
 
             default -> PlaylistManager.sendFeedback(player, "\u26a0 Unknown action: " + action);
