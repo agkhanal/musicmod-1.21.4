@@ -13,8 +13,8 @@
   },
   "mixins": ["musicmod.mixins.json"],
   "depends": {
-    "fabricloader": ">=0.16.0",
+    "fabricloader": ">=0.15.0",
     "fabric-api": "*",
-    "minecraft": "~1.21.4"
+    "minecraft": "~1.21.1"
   }
 }

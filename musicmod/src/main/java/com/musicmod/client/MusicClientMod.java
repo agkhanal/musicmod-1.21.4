@@ -88,8 +88,8 @@ public class MusicClientMod implements ClientModInitializer {
         });
 
         // ── HUD ──────────────────────────────────────────────────────────────────
-        HudRenderCallback.EVENT.register((ctx, tickCounter) ->
-            MusicHudRenderer.get().render(ctx, tickCounter));
+        HudRenderCallback.EVENT.register((ctx, tickDelta) ->
+            MusicHudRenderer.get().render(ctx, tickDelta));
 
         LOGGER.info("MusicMod client ready. Press M to open Music Manager.");
     }

@@ -19,7 +19,7 @@ public class MusicServerMod implements ModInitializer {
 
     @Override
     public void onInitialize() {
-        LOGGER.info("ServerMusicPlayer initializing (1.21.4)...");
+        LOGGER.info("ServerMusicPlayer initializing (1.21.1)...");
 
         MusicConfig.get();
         MusicCommands.register();
