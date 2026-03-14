@@ -4,7 +4,6 @@ import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
-import net.minecraft.client.render.RenderTickCounter;
 
 /**
  * "Now Playing" HUD overlay.
@@ -44,7 +43,7 @@ public class MusicHudRenderer {
         if (!songPlaying && fadeTicks > 0) fadeTicks--;
     }
 
-    public void render(DrawContext ctx, RenderTickCounter counter) {
+    public void render(DrawContext ctx, float tickDelta) {
         ClientMusicConfig cfg = ClientMusicConfig.get();
         if (!cfg.hudEnabled) return;
         if (songName.isEmpty()) return;
