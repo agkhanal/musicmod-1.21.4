@@ -43,7 +43,7 @@ public class MusicHudRenderer {
         if (!songPlaying && fadeTicks > 0) fadeTicks--;
     }
 
-    public void render(DrawContext ctx, float tickDelta) {
+    public void render(DrawContext ctx) {
         ClientMusicConfig cfg = ClientMusicConfig.get();
         if (!cfg.hudEnabled) return;
         if (songName.isEmpty()) return;
