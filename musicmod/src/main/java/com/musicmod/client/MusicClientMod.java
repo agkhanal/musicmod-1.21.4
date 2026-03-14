@@ -6,6 +6,7 @@ import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.minecraft.client.option.KeyBinding;
@@ -25,14 +26,19 @@ public class MusicClientMod implements ClientModInitializer {
     public void onInitializeClient() {
         LOGGER.info("MusicMod client initializing (1.21.4)...");
 
+        // Load client config and apply saved volume
+        ClientMusicConfig cfg = ClientMusicConfig.get();
+        MusicPlayer.get().setVolume(cfg.volume);
+
         // ── Keybinding ────────────────────────────────────────────────────────────
         openGuiKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
             "key.musicmod.open", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_M, "category.musicmod"));
 
         // ── S2C receivers ─────────────────────────────────────────────────────────
         ClientPlayNetworking.registerGlobalReceiver(MusicPackets.PlaySongPayload.ID,
-            (payload, context) -> context.client().execute(() ->
-                MusicPlayer.get().play(payload.url())));
+            (payload, context) -> context.client().execute(() -> {
+                MusicPlayer.get().play(payload.url(), payload.durationSeconds());
+            }));
 
         ClientPlayNetworking.registerGlobalReceiver(MusicPackets.StopMusicPayload.ID,
             (payload, context) -> context.client().execute(() -> {
@@ -55,6 +61,15 @@ public class MusicClientMod implements ClientModInitializer {
             (payload, context) -> context.client().execute(() -> {
                 if (openScreen != null) openScreen.setFeedback(payload.message());
             }));
+
+        // ── Stop music when leaving world ─────────────────────────────────────────
+        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+            client.execute(() -> {
+                MusicPlayer.get().stop();
+                MusicHudRenderer.get().clear();
+                LOGGER.info("Disconnected from server — stopped music.");
+            });
+        });
 
         // ── Tick ─────────────────────────────────────────────────────────────────
         ClientTickEvents.END_CLIENT_TICK.register(client -> {

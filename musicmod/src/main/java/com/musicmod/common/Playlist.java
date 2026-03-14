@@ -25,6 +25,7 @@ public class Playlist {
     public boolean removeSong(String name) { return songs.removeIf(s -> s.getDisplayName().equalsIgnoreCase(name)); }
     public void reset()                    { currentIndex = 0; }
     public int size()                      { return songs.size(); }
+    public int getCurrentIndex()           { return currentIndex; }
 
     public Song current() {
         return songs.isEmpty() ? null : songs.get(currentIndex);
@@ -38,6 +39,31 @@ public class Playlist {
         return songs.get(currentIndex);
     }
 
+    /** Jump to a specific index and return that song. */
+    public Song playFromIndex(int index) {
+        if (songs.isEmpty() || index < 0 || index >= songs.size()) return null;
+        currentIndex = index;
+        return songs.get(currentIndex);
+    }
+
+    /** Move song from one index to another (for reordering). */
+    public boolean moveSong(int fromIndex, int toIndex) {
+        if (fromIndex < 0 || fromIndex >= songs.size()) return false;
+        if (toIndex < 0 || toIndex >= songs.size()) return false;
+        if (fromIndex == toIndex) return true;
+        Song song = songs.remove(fromIndex);
+        songs.add(toIndex, song);
+        // Adjust currentIndex so the same song stays "current"
+        if (currentIndex == fromIndex) {
+            currentIndex = toIndex;
+        } else if (fromIndex < toIndex) {
+            if (currentIndex > fromIndex && currentIndex <= toIndex) currentIndex--;
+        } else {
+            if (currentIndex >= toIndex && currentIndex < fromIndex) currentIndex++;
+        }
+        return true;
+    }
+
     // ─── Song ────────────────────────────────────────────────────────────────────
 
     public static class Song {
@@ -46,7 +72,7 @@ public class Playlist {
         private String displayName;
 
         /**
-         * Original URL the user pasted — YouTube, Spotify, or direct audio link.
+         * Original URL the user pasted — YouTube, Spotify, SoundCloud, or direct audio link.
          * Stored persistently.
          */
         private final String sourceUrl;
@@ -58,6 +84,9 @@ public class Playlist {
         private transient String resolvedUrl;
         private transient long   resolvedAt = 0; // epoch millis
 
+        /** Duration in seconds; -1 if unknown. */
+        private transient int durationSeconds = -1;
+
         public Song(String displayName, String sourceUrl) {
             this.displayName = displayName;
             this.sourceUrl   = sourceUrl;
@@ -67,6 +96,9 @@ public class Playlist {
         public void   setDisplayName(String n)  { this.displayName = n; }
         public String getSourceUrl()            { return sourceUrl; }
         public String getResolvedUrl()          { return resolvedUrl; }
+
+        public int  getDurationSeconds()        { return durationSeconds; }
+        public void setDurationSeconds(int s)   { this.durationSeconds = s; }
 
         /** Returns true if the cached resolved URL is still within TTL. */
         public boolean isResolved(int ttlSeconds) {
@@ -81,7 +113,7 @@ public class Playlist {
 
         /** True when the source link requires yt-dlp to obtain a playback URL. */
         public boolean needsResolution() {
-            return isYouTube(sourceUrl) || isSpotify(sourceUrl);
+            return isYouTube(sourceUrl) || isSpotify(sourceUrl) || isSoundCloud(sourceUrl);
         }
 
         public static boolean isYouTube(String url) {
@@ -90,6 +122,10 @@ public class Playlist {
 
         public static boolean isSpotify(String url) {
             return url != null && url.contains("open.spotify.com");
+        }
+
+        public static boolean isSoundCloud(String url) {
+            return url != null && url.contains("soundcloud.com");
         }
 
         /** The URL clients actually stream from. */

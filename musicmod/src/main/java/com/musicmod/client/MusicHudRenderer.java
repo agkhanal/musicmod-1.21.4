@@ -7,21 +7,21 @@ import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.render.RenderTickCounter;
 
 /**
- * Draws a subtle "Now Playing" overlay in the bottom-left corner.
- * Fades out after DISPLAY_DURATION_TICKS ticks.
+ * "Now Playing" HUD overlay.
  *
- * 1.21.4: No API changes needed here — DrawContext + RenderTickCounter signatures
- *         are the same. renderBackground removal doesn't affect HUD rendering.
+ * Shows permanently while a song is playing (configurable position).
+ * Includes a progress bar and volume indicator.
+ * Fades out after the song stops (brief 2s fade).
  */
 @Environment(EnvType.CLIENT)
 public class MusicHudRenderer {
 
-    private static final int DISPLAY_DURATION_TICKS = 200; // ~10 seconds
-    private static final int FADE_TICKS = 40;
+    private static final int FADE_TICKS = 40; // 2 seconds fade after stop
 
     private String songName     = "";
     private String playlistName = "";
-    private int ticksRemaining  = 0;
+    private boolean songPlaying = false; // true while server says a song is active
+    private int     fadeTicks   = 0;     // counts down after stop
 
     private static final MusicHudRenderer INSTANCE = new MusicHudRenderer();
     public static MusicHudRenderer get() { return INSTANCE; }
@@ -29,52 +29,112 @@ public class MusicHudRenderer {
     private MusicHudRenderer() {}
 
     public void showNowPlaying(String song, String playlist) {
-        this.songName      = song;
-        this.playlistName  = playlist;
-        this.ticksRemaining = DISPLAY_DURATION_TICKS;
+        this.songName     = song;
+        this.playlistName = playlist;
+        this.songPlaying  = true;
+        this.fadeTicks    = 0;
     }
 
     public void clear() {
-        ticksRemaining = 0;
-        songName       = "";
-        playlistName   = "";
+        songPlaying = false;
+        fadeTicks   = FADE_TICKS; // start fade-out
     }
 
     public void tick() {
-        if (ticksRemaining > 0) ticksRemaining--;
+        if (!songPlaying && fadeTicks > 0) fadeTicks--;
     }
 
     public void render(DrawContext ctx, RenderTickCounter counter) {
-        if (ticksRemaining <= 0 || songName.isEmpty()) return;
+        ClientMusicConfig cfg = ClientMusicConfig.get();
+        if (!cfg.hudEnabled) return;
+        if (songName.isEmpty()) return;
+        if (!songPlaying && fadeTicks <= 0) return;
 
         MinecraftClient mc = MinecraftClient.getInstance();
         if (mc.options.hudHidden) return;
 
-        float alpha = ticksRemaining < FADE_TICKS
-                ? (float) ticksRemaining / FADE_TICKS
+        float alpha = (!songPlaying && fadeTicks < FADE_TICKS)
+                ? (float) fadeTicks / FADE_TICKS
                 : 1.0f;
-        int a = (int)(alpha * 200);
+        int a = (int)(alpha * 210);
         if (a <= 0) return;
 
-        int x = 8;
-        int y = ctx.getScaledWindowHeight() - 36;
+        MusicPlayer player = MusicPlayer.get();
+        int elapsed  = player.getElapsedSeconds();
+        int duration = player.getDurationSeconds();
+        boolean hasDuration = duration > 0;
 
         String line1 = "\u266a " + songName;
         String line2 = playlistName.isEmpty() ? "" : "Playlist: " + playlistName;
+        String line3 = formatProgress(elapsed, duration, player.isPaused());
 
-        int w = Math.max(
-                mc.textRenderer.getWidth(line1),
-                line2.isEmpty() ? 0 : mc.textRenderer.getWidth(line2)
-        ) + 8;
-        int h = line2.isEmpty() ? 14 : 22;
+        int textW = mc.textRenderer.getWidth(line1);
+        if (!line2.isEmpty()) textW = Math.max(textW, mc.textRenderer.getWidth(line2));
+        textW = Math.max(textW, mc.textRenderer.getWidth(line3));
 
-        // Background fill
-        ctx.fill(x - 4, y - 2, x + w, y + h, (a << 24));
+        int barW = textW + 8;
+        int lines = 1 + (line2.isEmpty() ? 0 : 1) + 1; // always show progress line
+        int boxH  = 4 + lines * 10 + (hasDuration ? 6 : 0); // extra space for bar
 
-        // Text
-        ctx.drawTextWithShadow(mc.textRenderer, line1, x, y, (a << 24) | 0xFFFFFF);
-        if (!line2.isEmpty()) {
-            ctx.drawTextWithShadow(mc.textRenderer, line2, x, y + 10, (a << 24) | 0xAAAAAA);
+        int screenW = ctx.getScaledWindowWidth();
+        int screenH = ctx.getScaledWindowHeight();
+
+        // Compute position from anchor
+        int x, y;
+        switch (cfg.hudAnchor) {
+            case "TOP_LEFT" -> {
+                x = cfg.hudOffsetX;
+                y = cfg.hudOffsetY;
+            }
+            case "TOP_RIGHT" -> {
+                x = screenW - barW - cfg.hudOffsetX;
+                y = cfg.hudOffsetY;
+            }
+            case "BOTTOM_RIGHT" -> {
+                x = screenW - barW - cfg.hudOffsetX;
+                y = screenH - boxH - cfg.hudOffsetY;
+            }
+            default -> { // BOTTOM_LEFT
+                x = cfg.hudOffsetX;
+                y = screenH - boxH - cfg.hudOffsetY;
+            }
         }
+
+        // Background
+        ctx.fill(x - 4, y - 2, x + barW, y + boxH, (a << 24));
+
+        int ty = y;
+        ctx.drawTextWithShadow(mc.textRenderer, line1, x, ty, (a << 24) | 0xFFFFFF);
+        ty += 10;
+        if (!line2.isEmpty()) {
+            ctx.drawTextWithShadow(mc.textRenderer, line2, x, ty, (a << 24) | 0xAAAAAA);
+            ty += 10;
+        }
+        ctx.drawTextWithShadow(mc.textRenderer, line3, x, ty, (a << 24) | (player.isPaused() ? 0xFFAA00 : 0x55FF55));
+        ty += 10;
+
+        // Progress bar
+        if (hasDuration) {
+            float pct = Math.min(1f, (float) elapsed / duration);
+            int filledW = (int)(barW * pct);
+            ctx.fill(x - 2, ty, x + barW - 2, ty + 3, (a << 24) | 0x333333);
+            ctx.fill(x - 2, ty, x - 2 + filledW, ty + 3, (a << 24) | 0x55FF55);
+        }
+    }
+
+    private static String formatProgress(int elapsed, int duration, boolean paused) {
+        String elapsedStr = formatTime(elapsed);
+        String prefix = paused ? "\u23f8 " : "\u25b6 ";
+        if (duration > 0) {
+            return prefix + elapsedStr + " / " + formatTime(duration);
+        }
+        return prefix + elapsedStr;
+    }
+
+    private static String formatTime(int seconds) {
+        if (seconds < 0) seconds = 0;
+        int m = seconds / 60;
+        int s = seconds % 60;
+        return m + ":" + String.format("%02d", s);
     }
 }

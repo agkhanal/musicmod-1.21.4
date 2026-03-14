@@ -24,26 +24,18 @@ public class MusicServerMod implements ModInitializer {
         MusicConfig.get();
         MusicCommands.register();
 
-        // ── Register all payload types with the registry ──────────────────────────
-        // S2C payloads
-        PayloadTypeRegistry.playS2C().register(
-                MusicPackets.PlaySongPayload.ID, MusicPackets.PlaySongPayload.CODEC);
-        PayloadTypeRegistry.playS2C().register(
-                MusicPackets.StopMusicPayload.ID, MusicPackets.StopMusicPayload.CODEC);
-        PayloadTypeRegistry.playS2C().register(
-                MusicPackets.NowPlayingPayload.ID, MusicPackets.NowPlayingPayload.CODEC);
-        PayloadTypeRegistry.playS2C().register(
-                MusicPackets.SyncStatePayload.ID, MusicPackets.SyncStatePayload.CODEC);
-        PayloadTypeRegistry.playS2C().register(
-                MusicPackets.GuiFeedbackPayload.ID, MusicPackets.GuiFeedbackPayload.CODEC);
+        // ── Register all payload types ────────────────────────────────────────────
+        // S2C
+        PayloadTypeRegistry.playS2C().register(MusicPackets.PlaySongPayload.ID,    MusicPackets.PlaySongPayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(MusicPackets.StopMusicPayload.ID,   MusicPackets.StopMusicPayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(MusicPackets.NowPlayingPayload.ID,  MusicPackets.NowPlayingPayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(MusicPackets.SyncStatePayload.ID,   MusicPackets.SyncStatePayload.CODEC);
+        PayloadTypeRegistry.playS2C().register(MusicPackets.GuiFeedbackPayload.ID, MusicPackets.GuiFeedbackPayload.CODEC);
 
-        // C2S payloads
-        PayloadTypeRegistry.playC2S().register(
-                MusicPackets.AddSongPayload.ID, MusicPackets.AddSongPayload.CODEC);
-        PayloadTypeRegistry.playC2S().register(
-                MusicPackets.PlaylistActionPayload.ID, MusicPackets.PlaylistActionPayload.CODEC);
-        PayloadTypeRegistry.playC2S().register(
-                MusicPackets.RequestSyncPayload.ID, MusicPackets.RequestSyncPayload.CODEC);
+        // C2S
+        PayloadTypeRegistry.playC2S().register(MusicPackets.AddSongPayload.ID,         MusicPackets.AddSongPayload.CODEC);
+        PayloadTypeRegistry.playC2S().register(MusicPackets.PlaylistActionPayload.ID,  MusicPackets.PlaylistActionPayload.CODEC);
+        PayloadTypeRegistry.playC2S().register(MusicPackets.RequestSyncPayload.ID,     MusicPackets.RequestSyncPayload.CODEC);
 
         // ── Lifecycle ─────────────────────────────────────────────────────────────
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
@@ -93,25 +85,70 @@ public class MusicServerMod implements ModInitializer {
         MusicSessionController c = MusicSessionController.get();
 
         switch (action) {
-            case "play"          -> { if (c.getCurrentSong() != null) c.playSongAsync(c.getCurrentSong()); }
-            case "skip"          -> c.skipSong();
-            case "stop"          -> c.stopAll();
+            case "play" -> {
+                if (c.getCurrentSong() != null) c.playSongAsync(c.getCurrentSong());
+            }
+            case "skip" -> c.skipSong();
+            case "stop" -> c.stopAll();
+
             case "playlist_play" -> {
                 Playlist pl = pm.getPlaylist(arg);
-                if (pl == null)          PlaylistManager.sendFeedback(player, "\u26a0 Not found: " + arg);
+                if (pl == null)         PlaylistManager.sendFeedback(player, "\u26a0 Not found: " + arg);
                 else if (pl.size() == 0) PlaylistManager.sendFeedback(player, "\u26a0 Playlist is empty.");
                 else { c.playPlaylist(pl); PlaylistManager.sendFeedback(player, "\u25b6 Playing: " + arg); }
             }
+
+            case "playlist_play_song" -> {
+                // arg = "playlistName:songIndex"
+                String[] parts = arg.split(":", 2);
+                if (parts.length == 2) {
+                    Playlist pl = pm.getPlaylist(parts[0]);
+                    if (pl == null) { PlaylistManager.sendFeedback(player, "\u26a0 Playlist not found."); break; }
+                    try {
+                        int idx = Integer.parseInt(parts[1]);
+                        c.playFromIndex(pl, idx);
+                        PlaylistManager.sendFeedback(player, "\u25b6 Playing song " + (idx + 1) + " in " + parts[0]);
+                    } catch (NumberFormatException e) {
+                        PlaylistManager.sendFeedback(player, "\u26a0 Invalid song index.");
+                    }
+                }
+            }
+
+            case "play_song_url" -> {
+                // Play a single song by URL from the library
+                Playlist.Song song = pm.resolveSong(arg);
+                if (song == null) PlaylistManager.sendFeedback(player, "\u26a0 Song not found.");
+                else c.playSongAsync(song);
+            }
+
+            case "playlist_move_song" -> {
+                // arg = "playlistName:fromIndex:toIndex"
+                String[] parts = arg.split(":", 3);
+                if (parts.length == 3) {
+                    try {
+                        int from = Integer.parseInt(parts[1]);
+                        int to   = Integer.parseInt(parts[2]);
+                        boolean ok = pm.moveSongInPlaylist(parts[0], from, to);
+                        PlaylistManager.sendFeedback(player, ok ? "\u2714 Reordered." : "\u26a0 Failed to reorder.");
+                        pm.syncToPlayer(player);
+                    } catch (NumberFormatException e) {
+                        PlaylistManager.sendFeedback(player, "\u26a0 Invalid indices.");
+                    }
+                }
+            }
+
             case "create" -> {
                 boolean ok = pm.createPlaylist(arg);
                 PlaylistManager.sendFeedback(player, ok ? "\u2714 Created: " + arg : "\u26a0 Already exists: " + arg);
                 pm.syncToPlayer(player);
             }
+
             case "delete" -> {
                 boolean ok = pm.deletePlaylist(arg);
                 PlaylistManager.sendFeedback(player, ok ? "\u2714 Deleted: " + arg : "\u26a0 Not found: " + arg);
                 pm.syncToPlayer(player);
             }
+
             case "remove_from_playlist" -> {
                 String[] parts = arg.split(":", 2);
                 if (parts.length == 2) {
@@ -120,11 +157,13 @@ public class MusicServerMod implements ModInitializer {
                     pm.syncToPlayer(player);
                 }
             }
+
             case "remove_from_library" -> {
                 boolean ok = pm.removeSong(arg);
                 PlaylistManager.sendFeedback(player, ok ? "\u2714 Removed: " + arg : "\u26a0 Not found.");
                 pm.syncToPlayer(player);
             }
+
             default -> PlaylistManager.sendFeedback(player, "\u26a0 Unknown action: " + action);
         }
     }

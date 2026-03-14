@@ -13,13 +13,15 @@ import java.util.*;
 import java.util.concurrent.*;
 
 /**
- * Resolves YouTube/Spotify links to publicly accessible mp3 URLs.
+ * Resolves YouTube/Spotify/SoundCloud links to publicly accessible mp3 URLs.
  *
  * Flow:
  *  1. Run yt-dlp -x --audio-format mp3 to download + convert
- *  2. Upload the mp3 to 0x0.st (free public file host, no account needed)
- *  3. Return the public URL — works through Essential/any tunnel
+ *  2. Upload the mp3 to catbox.moe (free public file host)
+ *  3. Return the public URL
  *
+ * Spotify without credentials: use oembed API to get title, then search YouTube.
+ * SoundCloud: yt-dlp handles it natively.
  * Direct audio URLs are passed through unchanged.
  */
 public class LinkResolver {
@@ -58,16 +60,21 @@ public class LinkResolver {
 
         String src = song.getSourceUrl();
         try {
-            if (!Playlist.Song.isYouTube(src) && !Playlist.Song.isSpotify(src)) {
+            if (!Playlist.Song.isYouTube(src) && !Playlist.Song.isSpotify(src) && !Playlist.Song.isSoundCloud(src)) {
                 song.setResolvedUrl(src);
                 return true;
             }
 
             String targetUrl = src;
+
             if (Playlist.Song.isSpotify(src)) {
                 targetUrl = resolveSpotifyToYoutube(src, cfg);
-                if (targetUrl == null) return false;
+                if (targetUrl == null) {
+                    LOGGER.error("Failed to resolve Spotify URL to YouTube: {}", src);
+                    return false;
+                }
             }
+            // SoundCloud and YouTube go straight to downloadConvertAndUpload
 
             return downloadConvertAndUpload(song, targetUrl, cfg);
 
@@ -96,7 +103,7 @@ public class LinkResolver {
         final String id = idTemp;
         final Path outFile = CACHE_DIR.resolve(id + ".mp3");
 
-        // Check if we have a cached public URL that's still fresh
+        // Check cached public URL
         Path urlCacheFile = CACHE_DIR.resolve(id + ".url");
         if (Files.exists(urlCacheFile)) {
             long age = System.currentTimeMillis() - Files.getLastModifiedTime(urlCacheFile).toMillis();
@@ -105,6 +112,12 @@ public class LinkResolver {
                 if (!cachedUrl.isBlank()) {
                     song.setResolvedUrl(cachedUrl);
                     LOGGER.info("Using cached public URL for: {}", song.getDisplayName());
+                    // Try to load cached duration
+                    Path durFile = CACHE_DIR.resolve(id + ".dur");
+                    if (Files.exists(durFile)) {
+                        try { song.setDurationSeconds(Integer.parseInt(Files.readString(durFile).trim())); }
+                        catch (Exception ignored) {}
+                    }
                     return true;
                 }
             }
@@ -115,6 +128,14 @@ public class LinkResolver {
         String title = runProcess(titleCmd, cfg.resolveTimeoutSeconds);
         if (title != null && !title.isBlank())
             song.setDisplayName(title.trim());
+
+        // Get duration
+        List<String> durCmd = List.of(cfg.ytDlpPath, "--get-duration", "--no-playlist", url);
+        String durStr = runProcess(durCmd, cfg.resolveTimeoutSeconds);
+        if (durStr != null && !durStr.isBlank()) {
+            int dur = parseDuration(durStr.trim());
+            if (dur > 0) song.setDurationSeconds(dur);
+        }
 
         // Download and convert to mp3
         LOGGER.info("Downloading mp3 for: {}", song.getDisplayName());
@@ -129,7 +150,7 @@ public class LinkResolver {
         );
         runProcess(dlCmd, cfg.resolveTimeoutSeconds * 3);
 
-        // Find the output file
+        // Find output file
         final Path mp3File;
         if (Files.exists(outFile)) {
             mp3File = outFile;
@@ -147,22 +168,25 @@ public class LinkResolver {
             }
         }
 
-        // Upload to 0x0.st
-        LOGGER.info("Uploading to 0x0.st: {}", song.getDisplayName());
+        // Upload to catbox.moe
+        LOGGER.info("Uploading to catbox.moe: {}", song.getDisplayName());
         String publicUrl = uploadTo0x0(mp3File);
         if (publicUrl == null || publicUrl.isBlank()) {
-            LOGGER.error("Upload to 0x0.st failed for: {}", song.getDisplayName());
+            LOGGER.error("Upload to catbox.moe failed for: {}", song.getDisplayName());
             return false;
         }
 
-        // Cache the public URL
+        // Cache URL and duration
         Files.writeString(urlCacheFile, publicUrl);
+        if (song.getDurationSeconds() > 0) {
+            Files.writeString(CACHE_DIR.resolve(id + ".dur"), String.valueOf(song.getDurationSeconds()));
+        }
         song.setResolvedUrl(publicUrl);
-        LOGGER.info("Uploaded '{}' -> {}", song.getDisplayName(), publicUrl);
+        LOGGER.info("Uploaded '{}' -> {} ({}s)", song.getDisplayName(), publicUrl, song.getDurationSeconds());
         return true;
     }
 
-    // ── Upload to 0x0.st ──────────────────────────────────────────────────────
+    // ── Upload to catbox.moe ──────────────────────────────────────────────────
 
     private String uploadTo0x0(Path file) {
         try {
@@ -177,8 +201,7 @@ public class LinkResolver {
             body.write(partHeader.getBytes());
             body.write(fileBytes);
             String typeHeader = "\r\n--" + boundary + "\r\n" +
-                "Content-Disposition: form-data; name=\"reqtype\"\r\n\r\n" +
-                "fileupload\r\n--" + boundary + "--\r\n";
+                "Content-Disposition: form-data; name=\"reqtype\"\r\n\r\nfileupload\r\n--" + boundary + "--\r\n";
             body.write(typeHeader.getBytes());
 
             HttpURLConnection conn = (HttpURLConnection)
@@ -213,6 +236,7 @@ public class LinkResolver {
 
     private String resolveSpotifyToYoutube(String spotifyUrl, MusicConfig cfg) throws Exception {
         if (cfg.hasSpotifyCredentials()) {
+            // Use Spotify API
             String trackId = extractSpotifyTrackId(spotifyUrl);
             if (trackId != null) {
                 SpotifyTrackInfo info = fetchSpotifyTrackInfo(trackId, cfg);
@@ -221,7 +245,41 @@ public class LinkResolver {
                 }
             }
         }
+
+        // Fallback: use Spotify oEmbed API (no credentials required) to get title
+        String oembedTitle = fetchSpotifyTitleFromOembed(spotifyUrl);
+        if (oembedTitle != null && !oembedTitle.isBlank()) {
+            LOGGER.info("Got Spotify title via oEmbed: {}", oembedTitle);
+            String ytUrl = searchYouTube(oembedTitle, cfg);
+            if (ytUrl != null) return ytUrl;
+        }
+
+        // Last resort: try yt-dlp directly on the Spotify URL
+        // (works for Spotify podcast episodes and sometimes previews)
+        LOGGER.warn("Trying yt-dlp directly on Spotify URL (may fail for full tracks): {}", spotifyUrl);
         return spotifyUrl;
+    }
+
+    /**
+     * Fetch track title from Spotify's public oEmbed endpoint.
+     * Returns "Artist - Title" format or just title. No credentials required.
+     */
+    private String fetchSpotifyTitleFromOembed(String spotifyUrl) {
+        try {
+            String encodedUrl = URLEncoder.encode(spotifyUrl, "UTF-8");
+            URL apiUrl = new URL("https://open.spotify.com/oembed?url=" + encodedUrl);
+            HttpURLConnection conn = (HttpURLConnection) apiUrl.openConnection();
+            conn.setConnectTimeout(8000);
+            conn.setReadTimeout(8000);
+            conn.setRequestProperty("User-Agent", "MinecraftMusicMod/1.0");
+            if (conn.getResponseCode() != 200) return null;
+            String json = new String(conn.getInputStream().readAllBytes());
+            // oEmbed returns {"title": "Artist Name - Track Name", ...}
+            return extractJsonField(json, "title");
+        } catch (Exception e) {
+            LOGGER.warn("Spotify oEmbed lookup failed: {}", e.getMessage());
+            return null;
+        }
     }
 
     private static class SpotifyTrackInfo { String title, artist; }
@@ -292,6 +350,14 @@ public class LinkResolver {
             return "yt:" + url.replaceAll(".*[?&]v=([^&]+).*", "$1");
         if (Playlist.Song.isSpotify(url))
             return "spot:" + extractTrackIdStatic(url);
+        if (Playlist.Song.isSoundCloud(url)) {
+            try {
+                String path = new URL(url).getPath();
+                String[] parts = path.split("/");
+                // SoundCloud URLs: /artist/track-name
+                return parts.length >= 3 ? "sc:" + parts[2] : "sc:" + url.hashCode();
+            } catch (Exception e) { return "sc:" + url.hashCode(); }
+        }
         try {
             String path = new URL(url).getPath();
             String file = path.substring(path.lastIndexOf('/') + 1);
@@ -313,6 +379,15 @@ public class LinkResolver {
             String[] parts = path.split("/");
             return parts.length >= 3 ? parts[2] : url;
         } catch (Exception e) { return url; }
+    }
+
+    private static int parseDuration(String s) {
+        try {
+            String[] parts = s.split(":");
+            int seconds = 0;
+            for (String p : parts) seconds = seconds * 60 + Integer.parseInt(p.trim());
+            return seconds;
+        } catch (Exception e) { return -1; }
     }
 
     private static String extractJsonField(String json, String key) {

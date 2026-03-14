@@ -106,6 +106,11 @@ public class PlaylistManager {
         boolean ok = p.removeSong(song); if (ok) save(); return ok;
     }
 
+    public boolean moveSongInPlaylist(String pl, int fromIndex, int toIndex) {
+        Playlist p = getPlaylist(pl); if (p == null) return false;
+        boolean ok = p.moveSong(fromIndex, toIndex); if (ok) save(); return ok;
+    }
+
     public void syncToPlayer(ServerPlayerEntity player) {
         ServerPlayNetworking.send(player, new MusicPackets.SyncStatePayload(buildSyncJson()));
     }
@@ -116,15 +121,20 @@ public class PlaylistManager {
 
     public String buildSyncJson() {
         JsonObject root = new JsonObject();
+
+        // Library
         JsonArray libArr = new JsonArray();
         for (Playlist.Song s : library.values()) {
             JsonObject o = new JsonObject();
             o.addProperty("name", s.getDisplayName());
             o.addProperty("url", s.getSourceUrl());
             o.addProperty("resolved", s.isResolved(MusicConfig.get().urlCacheTtlSeconds));
+            o.addProperty("duration", s.getDurationSeconds());
             libArr.add(o);
         }
         root.add("library", libArr);
+
+        // Playlists — include full song details so client can show playlist songs
         JsonArray plArr = new JsonArray();
         for (Playlist pl : playlists.values()) {
             JsonObject pObj = new JsonObject();
@@ -135,18 +145,23 @@ public class PlaylistManager {
                 JsonObject sObj = new JsonObject();
                 sObj.addProperty("name", s.getDisplayName());
                 sObj.addProperty("url", s.getSourceUrl());
+                sObj.addProperty("resolved", s.isResolved(MusicConfig.get().urlCacheTtlSeconds));
+                sObj.addProperty("duration", s.getDurationSeconds());
                 songs.add(sObj);
             }
             pObj.add("songs", songs);
             plArr.add(pObj);
         }
         root.add("playlists", plArr);
+
+        // Session
         MusicSessionController ctrl = MusicSessionController.get();
         JsonObject session = new JsonObject();
         session.addProperty("playing", ctrl.isPlaying());
-        session.addProperty("song", ctrl.getCurrentSong() != null ? ctrl.getCurrentSong().getDisplayName() : "");
+        session.addProperty("song",     ctrl.getCurrentSong() != null ? ctrl.getCurrentSong().getDisplayName() : "");
         session.addProperty("playlist", ctrl.getActivePlaylist() != null ? ctrl.getActivePlaylist().getName() : "");
         root.add("session", session);
+
         return GSON.toJson(root);
     }
 
