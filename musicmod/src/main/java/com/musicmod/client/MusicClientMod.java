@@ -37,7 +37,11 @@ public class MusicClientMod implements ClientModInitializer {
         // ── S2C receivers ─────────────────────────────────────────────────────────
         ClientPlayNetworking.registerGlobalReceiver(MusicPackets.PlaySongPayload.ID,
             (payload, context) -> context.client().execute(() -> {
-                MusicPlayer.get().play(payload.url(), payload.durationSeconds());
+                MusicPlayer player = MusicPlayer.get();
+                player.play(payload.url(), payload.durationSeconds());
+                // When the song ends naturally, notify the server so it can advance
+                player.setOnFinished(() ->
+                    ClientPlayNetworking.send(new MusicPackets.PlaylistActionPayload("song_finished", "")));
             }));
 
         ClientPlayNetworking.registerGlobalReceiver(MusicPackets.StopMusicPayload.ID,

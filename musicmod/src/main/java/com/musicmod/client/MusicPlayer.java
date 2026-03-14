@@ -1,8 +1,9 @@
 package com.musicmod.client;
 
-import javazoom.jl.player.advanced.AdvancedPlayer;
-import javazoom.jl.player.advanced.PlaybackEvent;
-import javazoom.jl.player.advanced.PlaybackListener;
+import javazoom.jl.decoder.Bitstream;
+import javazoom.jl.decoder.Decoder;
+import javazoom.jl.decoder.Header;
+import javazoom.jl.decoder.SampleBuffer;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.slf4j.Logger;
@@ -20,8 +21,9 @@ import java.util.concurrent.*;
 /**
  * Handles client-side audio playback.
  * Supports:
- *   • MP3  – streamed via JLayer (AdvancedPlayer), with pause via byte-range resume
- *   • WAV / OGG / AIFF – via javax.sound.sampled (native pause/resume)
+ *   • MP3  – decoded frame-by-frame via JLayer (Bitstream/Decoder/SourceDataLine)
+ *             with real-time volume scaling and pause via byte-range resume
+ *   • WAV / OGG / AIFF – via javax.sound.sampled (native pause/resume + MASTER_GAIN)
  */
 @Environment(EnvType.CLIENT)
 public class MusicPlayer {
@@ -37,22 +39,22 @@ public class MusicPlayer {
                 return t;
             });
 
-    private volatile float volume = 0.8f;
-    private volatile boolean muted = false;
-    private volatile boolean stopped = false;
-    private volatile boolean paused  = false;
+    private volatile float   volume        = 0.8f;
+    private volatile boolean muted         = false;
+    private volatile boolean stopped       = false;
+    private volatile boolean paused        = false;
 
     // Active playback handles
-    private AdvancedPlayer mp3Player;
-    private Clip wavClip;
-    private Future<?> playFuture;
+    private SourceDataLine mp3Line;
+    private Clip            wavClip;
+    private Future<?>       playFuture;
 
     // For pause/resume and progress tracking
     private volatile String  currentUrl     = null;
-    private volatile long    playStartTime  = 0;    // millis when this segment started
-    private volatile long    pausedElapsed  = 0;    // accumulated elapsed ms before this segment
-    private volatile long    pausedBytes    = 0;    // bytes read before pause (for MP3 resume)
-    private volatile int     serverDuration = -1;   // duration from server metadata (seconds)
+    private volatile long    playStartTime  = 0;   // millis when this segment started
+    private volatile long    pausedElapsed  = 0;   // accumulated elapsed ms before this segment
+    private volatile long    pausedBytes    = 0;   // bytes read before pause (for MP3 resume)
+    private volatile int     serverDuration = -1;  // duration from server metadata (seconds)
 
     // Callback fired when a track finishes naturally
     private Runnable onFinished;
@@ -63,18 +65,16 @@ public class MusicPlayer {
 
     public void setOnFinished(Runnable cb) { this.onFinished = cb; }
 
-    public void play(String url) {
-        play(url, -1);
-    }
+    public void play(String url) { play(url, -1); }
 
     public void play(String url, int durationSeconds) {
         stop();
-        stopped       = false;
-        paused        = false;
-        currentUrl    = url;
-        pausedElapsed = 0;
-        pausedBytes   = 0;
-        playStartTime = System.currentTimeMillis();
+        stopped        = false;
+        paused         = false;
+        currentUrl     = url;
+        pausedElapsed  = 0;
+        pausedBytes    = 0;
+        playStartTime  = System.currentTimeMillis();
         serverDuration = durationSeconds;
         startPlayback(url, 0);
     }
@@ -84,9 +84,9 @@ public class MusicPlayer {
         stopped = true;
         paused  = false;
         stopCurrentHandles();
-        currentUrl    = null;
-        pausedElapsed = 0;
-        pausedBytes   = 0;
+        currentUrl     = null;
+        pausedElapsed  = 0;
+        pausedBytes    = 0;
         serverDuration = -1;
     }
 
@@ -94,33 +94,29 @@ public class MusicPlayer {
     public void pause() {
         if (stopped || paused || currentUrl == null) return;
         paused = true;
-        // Save elapsed time up to this pause
         pausedElapsed += System.currentTimeMillis() - playStartTime;
         if (wavClip != null && wavClip.isOpen()) {
             wavClip.stop(); // position is preserved in Clip
-        } else {
-            // For MP3: record bytes read and stop
-            stopCurrentHandles();
         }
+        // For MP3: the decode loop checks `paused` each frame and exits cleanly;
+        // pausedBytes is updated when the loop exits.
     }
 
     /** Resume from where we paused. */
     public void resume() {
         if (stopped || !paused || currentUrl == null) return;
-        paused = false;
+        paused        = false;
         playStartTime = System.currentTimeMillis();
 
         if (wavClip != null && wavClip.isOpen()) {
-            // WAV clip keeps position — just restart
             wavClip.start();
         } else {
-            // MP3: reconnect from byte offset
-            final long skipBytes = pausedBytes;
-            final String url = currentUrl;
+            // MP3: reconnect from byte offset saved when decode loop exited
+            final long   skipBytes = pausedBytes;
+            final String url       = currentUrl;
             playFuture = executor.submit(() -> {
-                try {
-                    playMp3FromOffset(url, skipBytes);
-                } catch (Exception e) {
+                try { playMp3FromOffset(url, skipBytes); }
+                catch (Exception e) {
                     if (!stopped) LOGGER.error("Resume error: {}", e.getMessage());
                 }
             });
@@ -153,21 +149,17 @@ public class MusicPlayer {
         applyVolumeToClip();
     }
 
-    public float getVolume() { return volume; }
-
-    public void setMuted(boolean m) {
-        this.muted = m;
-        applyVolumeToClip();
-    }
-
-    public boolean isMuted() { return muted; }
+    public float   getVolume() { return volume; }
+    public void    setMuted(boolean m) { this.muted = m; applyVolumeToClip(); }
+    public boolean isMuted()   { return muted; }
 
     // ─── Internal helpers ─────────────────────────────────────────────────────────
 
     private void stopCurrentHandles() {
-        if (mp3Player != null) {
-            try { mp3Player.stop(); } catch (Exception ignored) {}
-            mp3Player = null;
+        // Signal decode loop to exit via `stopped` flag (already set by caller)
+        if (mp3Line != null) {
+            try { mp3Line.stop(); mp3Line.close(); } catch (Exception ignored) {}
+            mp3Line = null;
         }
         if (wavClip != null) {
             wavClip.stop();
@@ -183,22 +175,32 @@ public class MusicPlayer {
     private void startPlayback(String url, long skipBytes) {
         playFuture = executor.submit(() -> {
             try {
-                if (url.toLowerCase().endsWith(".mp3") || isMp3(url)) {
+                if (looksLikeMp3(url)) {
                     playMp3FromOffset(url, skipBytes);
                 } else {
                     playWav(url);
                 }
             } catch (Exception e) {
-                LOGGER.error("Playback error for {}: {}", url, e.getMessage());
+                if (!stopped) LOGGER.error("Playback error for {}: {}", url, e.getMessage());
             }
         });
     }
 
-    // ─── MP3 Playback ────────────────────────────────────────────────────────────
+    private static boolean looksLikeMp3(String url) {
+        String lower = url.toLowerCase();
+        int q = lower.indexOf('?');
+        String path = q >= 0 ? lower.substring(0, q) : lower;
+        return path.endsWith(".mp3");
+    }
+
+    // ─── MP3 Playback (Bitstream/Decoder/SourceDataLine with volume scaling) ──────
 
     private void playMp3FromOffset(String url, long skipBytes) {
+        URLConnection conn = null;
+        SourceDataLine line = null;
+        Bitstream bitstream = null;
         try {
-            URLConnection conn = new URL(url).openConnection();
+            conn = new URL(url).openConnection();
             conn.setConnectTimeout(8000);
             conn.setReadTimeout(30000);
             conn.setRequestProperty("User-Agent", "MinecraftMusicMod/1.0");
@@ -208,24 +210,65 @@ public class MusicPlayer {
 
             CountingInputStream countingStream =
                     new CountingInputStream(new BufferedInputStream(conn.getInputStream()));
-            countingStream.setBaseCount(skipBytes); // start counting from offset
+            countingStream.setBaseCount(skipBytes);
 
-            mp3Player = new AdvancedPlayer(countingStream);
-            mp3Player.setPlayBackListener(new PlaybackListener() {
-                @Override
-                public void playbackFinished(PlaybackEvent evt) {
-                    // Save byte position (for potential future seek)
-                    pausedBytes = countingStream.getCount();
-                    if (!stopped && !paused && onFinished != null) {
-                        onFinished.run();
-                    }
+            bitstream = new Bitstream(countingStream);
+            Decoder decoder = new Decoder();
+
+            while (!stopped && !paused) {
+                Header header = bitstream.readFrame();
+                if (header == null) break; // natural end of stream
+
+                SampleBuffer output = (SampleBuffer) decoder.decodeFrame(header, bitstream);
+
+                if (line == null) {
+                    AudioFormat fmt = new AudioFormat(
+                            output.getSampleFrequency(),
+                            16,
+                            output.getChannelCount(),
+                            true,   // signed
+                            false   // little-endian
+                    );
+                    DataLine.Info info = new DataLine.Info(SourceDataLine.class, fmt);
+                    line = (SourceDataLine) AudioSystem.getLine(info);
+                    line.open(fmt);
+                    line.start();
+                    mp3Line = line;
                 }
-            });
-            mp3Player.play();
-            // Record bytes read when this finishes
+
+                // Scale PCM samples by effective volume
+                short[] samples = output.getBuffer();
+                int     len     = output.getBufferLength(); // valid interleaved shorts
+                byte[]  pcm     = new byte[len * 2];
+                float   eff     = muted ? 0f : volume;
+                for (int i = 0; i < len; i++) {
+                    int scaled = Math.round(samples[i] * eff);
+                    scaled = Math.max(Short.MIN_VALUE, Math.min(Short.MAX_VALUE, scaled));
+                    pcm[i * 2]     = (byte)(scaled & 0xFF);
+                    pcm[i * 2 + 1] = (byte)((scaled >> 8) & 0xFF);
+                }
+                line.write(pcm, 0, pcm.length);
+                bitstream.closeFrame();
+            }
+
             pausedBytes = countingStream.getCount();
+
+            // Drain only if we finished naturally (not stopped/paused)
+            if (!stopped && !paused && line != null) {
+                line.drain();
+                if (onFinished != null) onFinished.run();
+            }
+
         } catch (Exception e) {
             if (!stopped && !paused) LOGGER.error("MP3 error: {}", e.getMessage());
+        } finally {
+            if (line != null) {
+                try { line.stop(); line.close(); } catch (Exception ignored) {}
+                if (mp3Line == line) mp3Line = null;
+            }
+            if (bitstream != null) {
+                try { bitstream.close(); } catch (Exception ignored) {}
+            }
         }
     }
 
@@ -242,7 +285,7 @@ public class MusicPlayer {
                         new BufferedInputStream(conn.getInputStream()))) {
 
                 AudioFormat base = raw.getFormat();
-                AudioFormat pcm = new AudioFormat(
+                AudioFormat pcm  = new AudioFormat(
                         AudioFormat.Encoding.PCM_SIGNED,
                         base.getSampleRate(), 16,
                         base.getChannels(),
@@ -282,25 +325,13 @@ public class MusicPlayer {
         FloatControl gain = (FloatControl) wavClip.getControl(FloatControl.Type.MASTER_GAIN);
         float effectiveVolume = muted ? 0f : volume;
         float dB = effectiveVolume > 0
-                ? (float) (20.0 * Math.log10(effectiveVolume))
+                ? (float)(20.0 * Math.log10(effectiveVolume))
                 : gain.getMinimum();
         gain.setValue(Math.max(gain.getMinimum(), Math.min(gain.getMaximum(), dB)));
     }
 
-    private static boolean isMp3(String url) {
-        try {
-            URLConnection c = new URL(url).openConnection();
-            c.setConnectTimeout(3000);
-            String ct = c.getContentType();
-            return ct != null && ct.contains("mpeg");
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
     // ─── Counting InputStream ────────────────────────────────────────────────────
 
-    /** Wraps an InputStream and counts bytes read (with an optional base offset). */
     private static class CountingInputStream extends FilterInputStream {
         private long count = 0;
 
@@ -310,22 +341,19 @@ public class MusicPlayer {
 
         public long getCount() { return count; }
 
-        @Override
-        public int read() throws IOException {
+        @Override public int read() throws IOException {
             int b = super.read();
             if (b >= 0) count++;
             return b;
         }
 
-        @Override
-        public int read(byte[] b, int off, int len) throws IOException {
+        @Override public int read(byte[] b, int off, int len) throws IOException {
             int n = super.read(b, off, len);
             if (n > 0) count += n;
             return n;
         }
 
-        @Override
-        public long skip(long n) throws IOException {
+        @Override public long skip(long n) throws IOException {
             long skipped = super.skip(n);
             count += skipped;
             return skipped;

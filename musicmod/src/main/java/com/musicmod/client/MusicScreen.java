@@ -18,7 +18,7 @@ public class MusicScreen extends Screen {
 
     private static final int PANEL_W  = 170;
     private static final int HEADER_H = 24;
-    private static final int FOOTER_H = 100; // taller for volume + progress
+    private static final int FOOTER_H = 112; // taller for volume + progress + feedback
     private static final int ROW_H    = 14;
 
     // ── State from server ─────────────────────────────────────────────────────────
@@ -120,7 +120,7 @@ public class MusicScreen extends Screen {
         // URL input
         urlField = new TextFieldWidget(textRenderer, cx - 180, footerY + 8, 360, 14, Text.literal("url"));
         urlField.setMaxLength(1024);
-        urlField.setPlaceholder(Text.literal("Paste YouTube, Spotify, SoundCloud, or direct audio URL\u2026"));
+        urlField.setPlaceholder(Text.literal("Paste URL or playlist/album link (YouTube, SoundCloud, Spotify)\u2026"));
         addSelectableChild(urlField);
         setInitialFocus(urlField);
 
@@ -205,7 +205,10 @@ public class MusicScreen extends Screen {
         ctx.fill(0, 0, width, HEADER_H, 0xDD000000);
         ctx.drawCenteredTextWithShadow(textRenderer, "\ud83c\udfb5 Music Manager", width / 2, 7, 0xFFFFFF);
         if (!nowPlayingSong.isEmpty()) {
-            String np = "\u266a " + nowPlayingSong + (nowPlayingPlaylist.isEmpty() ? "" : "  [" + nowPlayingPlaylist + "]");
+            String suffix  = nowPlayingPlaylist.isEmpty() ? "" : "  [" + nowPlayingPlaylist + "]";
+            String prefix  = "\u266a ";
+            int    maxNPW  = width / 2 - 16;
+            String np      = prefix + truncate(nowPlayingSong, maxNPW) + suffix;
             ctx.drawTextWithShadow(textRenderer, np, width - textRenderer.getWidth(np) - 8, 7, 0x55FF55);
         }
 
@@ -247,8 +250,10 @@ public class MusicScreen extends Screen {
             int rowBg = sel ? 0xBB555522 : (isNP ? 0x44004400 : (hov ? 0x44FFFFFF : 0));
             ctx.fill(rightX + 2, ry, rightX + rightW - 2, ry + ROW_H - 1, rowBg);
 
-            // Song name
-            String songLabel = (s.resolved() ? "\u266a " : "\u23f3 ") + s.name();
+            // Song name (truncated to avoid overlap with duration/indicator)
+            int durW = (s.durationSeconds() > 0) ? textRenderer.getWidth("00:00") + 8 : 0;
+            int maxNamePx = rightW - 14 - durW;
+            String songLabel = (s.resolved() ? "\u266a " : "\u23f3 ") + truncate(s.name(), maxNamePx);
             int nameColor = isNP ? 0x55FF55 : (s.resolved() ? 0xFFFFFF : 0x888888);
             ctx.drawTextWithShadow(textRenderer, songLabel, rightX + 6, ry + 2, nameColor);
 
@@ -288,10 +293,14 @@ public class MusicScreen extends Screen {
         int progY = footerY + 82;
         MusicPlayer player = MusicPlayer.get();
         if (!nowPlayingSong.isEmpty()) {
-            int elapsed  = player.getElapsedSeconds();
             int duration = player.getDurationSeconds();
-            String progLabel = (player.isPaused() ? "\u23f8 " : "\u25b6 ")
-                    + nowPlayingSong + "  " + formatProgress(elapsed, duration);
+            int elapsed  = duration > 0
+                    ? Math.min(player.getElapsedSeconds(), duration)
+                    : player.getElapsedSeconds();
+            String icon     = player.isPaused() ? "\u23f8 " : "\u25b6 ";
+            String timeStr  = "  " + formatProgress(elapsed, duration);
+            int    maxSongW = width - 16 - textRenderer.getWidth(icon) - textRenderer.getWidth(timeStr);
+            String progLabel = icon + truncate(nowPlayingSong, maxSongW) + timeStr;
             ctx.drawTextWithShadow(textRenderer, progLabel, 8, progY, player.isPaused() ? 0xFFAA00 : 0x55FF55);
 
             if (duration > 0) {
@@ -302,9 +311,9 @@ public class MusicScreen extends Screen {
             }
         }
 
-        // Feedback
+        // Feedback — below progress bar, clear of all buttons
         if (!feedback.isEmpty() && System.currentTimeMillis() < feedbackExpiry)
-            ctx.drawTextWithShadow(textRenderer, feedback, width / 2 + 20, footerY + 48, 0xFFDD44);
+            ctx.drawTextWithShadow(textRenderer, feedback, 8, footerY + 98, 0xFFDD44);
 
         urlField.render(ctx, mouseX, mouseY, delta);
         playlistNameField.render(ctx, mouseX, mouseY, delta);
@@ -356,8 +365,8 @@ public class MusicScreen extends Screen {
             return true;
         }
 
-        // Playlist panel click
-        if (mx >= 6 && mx <= PANEL_W + 2 && my >= rowTop && my < panelBot) {
+        // Playlist panel click — exclude button row at panelBot-22 to panelBot
+        if (mx >= 6 && mx <= PANEL_W + 2 && my >= rowTop && my < panelBot - 22) {
             int idx = (int)(my - rowTop) / ROW_H + playlistScroll;
             if (idx >= 0 && idx < playlists.size()) {
                 selectedPlaylist = idx; selectedSong = -1; songScroll = 0;
@@ -366,8 +375,8 @@ public class MusicScreen extends Screen {
             }
         }
 
-        // Song panel click
-        if (mx >= rightX + 2 && mx <= rightX + rightW - 2 && my >= rowTop && my < panelBot) {
+        // Song panel click — exclude button row at panelBot-22 to panelBot
+        if (mx >= rightX + 2 && mx <= rightX + rightW - 2 && my >= rowTop && my < panelBot - 22) {
             int idx = (int)(my - rowTop) / ROW_H + songScroll;
             List<SongEntry> songs = getDisplaySongs();
             if (idx >= 0 && idx < songs.size()) {
@@ -524,6 +533,14 @@ public class MusicScreen extends Screen {
         if (selectedPlaylist >= 0 && selectedPlaylist < playlists.size())
             return playlists.get(selectedPlaylist).songs();
         return library;
+    }
+
+    private String truncate(String text, int maxPx) {
+        if (textRenderer.getWidth(text) <= maxPx) return text;
+        String ellipsis = "...";
+        while (!text.isEmpty() && textRenderer.getWidth(text + ellipsis) > maxPx)
+            text = text.substring(0, text.length() - 1);
+        return text + ellipsis;
     }
 
     private static String formatProgress(int elapsed, int duration) {
