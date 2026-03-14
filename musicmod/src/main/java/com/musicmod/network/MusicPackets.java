@@ -8,23 +8,18 @@ import net.minecraft.util.Identifier;
 
 /**
  * All custom network payloads for 1.21.4.
- *
- * 1.21.4 networking requires CustomPayload records with a CODEC and ID.
- * Old: new Identifier("mod","id") + PacketByteBuf
- * New: record implementing CustomPayload with PacketCodec
- *
- * Identifier construction changed to Identifier.of() in 1.21.
  */
 public class MusicPackets {
 
     // ── S2C: Play a song ─────────────────────────────────────────────────────────
-    public record PlaySongPayload(String name, String url) implements CustomPayload {
+    public record PlaySongPayload(String name, String url, int durationSeconds) implements CustomPayload {
         public static final Id<PlaySongPayload> ID =
                 new Id<>(Identifier.of("musicmod", "play_song"));
         public static final PacketCodec<PacketByteBuf, PlaySongPayload> CODEC =
                 PacketCodec.tuple(
-                        PacketCodecs.STRING, PlaySongPayload::name,
-                        PacketCodecs.STRING, PlaySongPayload::url,
+                        PacketCodecs.STRING,  PlaySongPayload::name,
+                        PacketCodecs.STRING,  PlaySongPayload::url,
+                        PacketCodecs.INTEGER, PlaySongPayload::durationSeconds,
                         PlaySongPayload::new);
         @Override public Id<PlaySongPayload> getId() { return ID; }
     }
@@ -85,6 +80,10 @@ public class MusicPackets {
     }
 
     // ── C2S: Playlist/playback action from GUI ────────────────────────────────────
+    // Actions: play, skip, stop, playlist_play, create, delete,
+    //          remove_from_playlist, remove_from_library,
+    //          playlist_play_song (arg = "playlistName:index"),
+    //          playlist_move_song (arg = "playlistName:fromIndex:toIndex")
     public record PlaylistActionPayload(String action, String arg) implements CustomPayload {
         public static final Id<PlaylistActionPayload> ID =
                 new Id<>(Identifier.of("musicmod", "c2s_playlist_action"));

@@ -44,6 +44,15 @@ public class MusicSessionController {
         resolveAndPlay(currentSong);
     }
 
+    /** Play a specific song by index within the active or given playlist. */
+    public void playFromIndex(Playlist playlist, int index) {
+        activePlaylist = playlist;
+        currentSong = playlist.playFromIndex(index);
+        if (currentSong == null) { broadcastChat("\u26a0 Index out of range."); return; }
+        playing = true;
+        resolveAndPlay(currentSong);
+    }
+
     public void skipSong() {
         if (activePlaylist == null) { stopAll(); return; }
         currentSong = activePlaylist.next();
@@ -61,7 +70,7 @@ public class MusicSessionController {
     private void resolveAndPlay(Playlist.Song song) {
         int ttl = MusicConfig.get().urlCacheTtlSeconds;
         if (!song.needsResolution() || song.isResolved(ttl)) {
-            broadcastPlay(song.getDisplayName(), song.getPlaybackUrl());
+            broadcastPlay(song.getDisplayName(), song.getPlaybackUrl(), song.getDurationSeconds());
             return;
         }
         broadcastChat("\u23f3 Resolving: " + song.getDisplayName() + "...");
@@ -70,7 +79,7 @@ public class MusicSessionController {
                 if (server == null) return;
                 server.execute(() -> {
                     if (!playing || currentSong != song) return;
-                    if (ok) broadcastPlay(song.getDisplayName(), song.getPlaybackUrl());
+                    if (ok) broadcastPlay(song.getDisplayName(), song.getPlaybackUrl(), song.getDurationSeconds());
                     else {
                         broadcastChat("\u26a0 Could not resolve: " + song.getDisplayName() + " - skipping.");
                         if (activePlaylist != null) skipSong();
@@ -80,14 +89,14 @@ public class MusicSessionController {
             });
     }
 
-    private void broadcastPlay(String name, String url) {
+    private void broadcastPlay(String name, String url, int durationSeconds) {
         if (server == null) return;
         for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
-            ServerPlayNetworking.send(p, new MusicPackets.PlaySongPayload(name, url));
+            ServerPlayNetworking.send(p, new MusicPackets.PlaySongPayload(name, url, durationSeconds));
             ServerPlayNetworking.send(p, new MusicPackets.NowPlayingPayload(
                     name, activePlaylist != null ? activePlaylist.getName() : ""));
         }
-        LOGGER.info("Broadcasting: {}", name);
+        LOGGER.info("Broadcasting: {} ({}s)", name, durationSeconds);
     }
 
     private void broadcastStop() {
@@ -107,7 +116,7 @@ public class MusicSessionController {
         int ttl = MusicConfig.get().urlCacheTtlSeconds;
         if (!currentSong.isResolved(ttl)) return;
         ServerPlayNetworking.send(player, new MusicPackets.PlaySongPayload(
-                currentSong.getDisplayName(), currentSong.getPlaybackUrl()));
+                currentSong.getDisplayName(), currentSong.getPlaybackUrl(), currentSong.getDurationSeconds()));
         ServerPlayNetworking.send(player, new MusicPackets.NowPlayingPayload(
                 currentSong.getDisplayName(),
                 activePlaylist != null ? activePlaylist.getName() : ""));
