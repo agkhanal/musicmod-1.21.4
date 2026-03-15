@@ -10,7 +10,7 @@ public class Playlist {
     private final List<Song> songs = new ArrayList<>();
     private int currentIndex = 0;
     private boolean shuffle = false;
-    private boolean loop    = true;
+    private boolean loop    = false; // default: play through once and stop
 
     public Playlist(String name) { this.name = name; }
 
@@ -31,11 +31,26 @@ public class Playlist {
         return songs.isEmpty() ? null : songs.get(currentIndex);
     }
 
+    /**
+     * Advance to the next song.
+     * Returns null when the playlist ends (loop=false) or if empty.
+     * Loops back to start when loop=true.
+     */
     public Song next() {
         if (songs.isEmpty()) return null;
-        currentIndex = shuffle
-            ? (int)(Math.random() * songs.size())
-            : (currentIndex + 1) % songs.size();
+        if (shuffle) {
+            currentIndex = (int)(Math.random() * songs.size());
+            return songs.get(currentIndex);
+        }
+        currentIndex++;
+        if (currentIndex >= songs.size()) {
+            if (loop) {
+                currentIndex = 0;
+                return songs.get(currentIndex);
+            }
+            currentIndex = songs.size() - 1; // leave at last position
+            return null; // end of playlist — caller should stop
+        }
         return songs.get(currentIndex);
     }
 
@@ -44,6 +59,17 @@ public class Playlist {
         if (songs.isEmpty() || index < 0 || index >= songs.size()) return null;
         currentIndex = index;
         return songs.get(currentIndex);
+    }
+
+    /** Find a song by its sourceUrl and set it as current. Returns null if not found. */
+    public Song playByUrl(String sourceUrl) {
+        for (int i = 0; i < songs.size(); i++) {
+            if (songs.get(i).getSourceUrl().equals(sourceUrl)) {
+                currentIndex = i;
+                return songs.get(i);
+            }
+        }
+        return null;
     }
 
     /** Move song from one index to another (for reordering). */
@@ -78,7 +104,7 @@ public class Playlist {
         private final String sourceUrl;
 
         /**
-         * Resolved direct audio URL (e.g. YouTube CDN URL from yt-dlp).
+         * Resolved direct audio URL (e.g. catbox.moe CDN URL from yt-dlp).
          * Cached in-memory only; re-resolved when expired or null.
          */
         private transient String resolvedUrl;

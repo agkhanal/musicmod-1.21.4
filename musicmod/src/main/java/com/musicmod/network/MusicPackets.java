@@ -12,7 +12,9 @@ import net.minecraft.util.Identifier;
 public class MusicPackets {
 
     // ── S2C: Play a song ─────────────────────────────────────────────────────────
-    public record PlaySongPayload(String name, String url, int durationSeconds) implements CustomPayload {
+    // songSeq increments each time a new song starts; clients echo it in song_finished
+    // so the server can ignore stale/duplicate finish events from multiple clients.
+    public record PlaySongPayload(String name, String url, int durationSeconds, int songSeq) implements CustomPayload {
         public static final Id<PlaySongPayload> ID =
                 new Id<>(Identifier.of("musicmod", "play_song"));
         public static final PacketCodec<PacketByteBuf, PlaySongPayload> CODEC =
@@ -20,6 +22,7 @@ public class MusicPackets {
                         PacketCodecs.STRING,  PlaySongPayload::name,
                         PacketCodecs.STRING,  PlaySongPayload::url,
                         PacketCodecs.INTEGER, PlaySongPayload::durationSeconds,
+                        PacketCodecs.INTEGER, PlaySongPayload::songSeq,
                         PlaySongPayload::new);
         @Override public Id<PlaySongPayload> getId() { return ID; }
     }

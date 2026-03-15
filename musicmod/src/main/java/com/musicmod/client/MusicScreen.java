@@ -452,8 +452,8 @@ public class MusicScreen extends Screen {
             return;
         }
         if (selectedPlaylist >= 0 && selectedPlaylist < playlists.size()) {
-            // Play this specific song in the playlist
-            String arg = playlists.get(selectedPlaylist).name() + ":" + selectedSong;
+            // Use source URL as the identifier — stable even when display names change
+            String arg = playlists.get(selectedPlaylist).name() + ":" + songs.get(selectedSong).url();
             sendAction("playlist_play_song", arg);
         } else {
             // Play from library
