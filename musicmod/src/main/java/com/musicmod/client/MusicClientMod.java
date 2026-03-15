@@ -39,9 +39,12 @@ public class MusicClientMod implements ClientModInitializer {
             (payload, context) -> context.client().execute(() -> {
                 MusicPlayer player = MusicPlayer.get();
                 player.play(payload.url(), payload.durationSeconds());
-                // When the song ends naturally, notify the server so it can advance
+                // Echo the song sequence number back when done so the server can
+                // ignore duplicate finish events from other players.
+                final int seq = payload.songSeq();
                 player.setOnFinished(() ->
-                    ClientPlayNetworking.send(new MusicPackets.PlaylistActionPayload("song_finished", "")));
+                    ClientPlayNetworking.send(
+                        new MusicPackets.PlaylistActionPayload("song_finished", String.valueOf(seq))));
             }));
 
         ClientPlayNetworking.registerGlobalReceiver(MusicPackets.StopMusicPayload.ID,

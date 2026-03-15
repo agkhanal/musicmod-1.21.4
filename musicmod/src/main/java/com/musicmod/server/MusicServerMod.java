@@ -107,18 +107,16 @@ public class MusicServerMod implements ModInitializer {
             }
 
             case "playlist_play_song" -> {
-                // arg = "playlistName:songIndex"
-                String[] parts = arg.split(":", 2);
-                if (parts.length == 2) {
-                    Playlist pl = pm.getPlaylist(parts[0]);
+                // arg = "playlistName:songSourceUrl" — URL is stable even as display names change
+                int sep = arg.indexOf(':');
+                int sep2 = arg.indexOf(':', sep + 1); // find second ':' to split name from full URL
+                if (sep2 > sep) {
+                    String plName = arg.substring(0, sep);
+                    String songUrl = arg.substring(sep + 1); // rest is the full URL (may contain ':')
+                    Playlist pl = pm.getPlaylist(plName);
                     if (pl == null) { PlaylistManager.sendFeedback(player, "\u26a0 Playlist not found."); break; }
-                    try {
-                        int idx = Integer.parseInt(parts[1]);
-                        c.playFromIndex(pl, idx);
-                        PlaylistManager.sendFeedback(player, "\u25b6 Playing song " + (idx + 1) + " in " + parts[0]);
-                    } catch (NumberFormatException e) {
-                        PlaylistManager.sendFeedback(player, "\u26a0 Invalid song index.");
-                    }
+                    c.playFromUrl(pl, songUrl);
+                    PlaylistManager.sendFeedback(player, "\u25b6 Playing from " + plName);
                 }
             }
 
@@ -127,6 +125,33 @@ public class MusicServerMod implements ModInitializer {
                 Playlist.Song song = pm.resolveSong(arg);
                 if (song == null) PlaylistManager.sendFeedback(player, "\u26a0 Song not found.");
                 else c.playSongAsync(song);
+            }
+
+            case "create" -> {
+                boolean ok = pm.createPlaylist(arg);
+                PlaylistManager.sendFeedback(player, ok ? "\u2714 Created: " + arg : "\u26a0 Already exists: " + arg);
+                pm.syncToAll();
+            }
+
+            case "delete" -> {
+                boolean ok = pm.deletePlaylist(arg);
+                PlaylistManager.sendFeedback(player, ok ? "\u2714 Deleted: " + arg : "\u26a0 Not found: " + arg);
+                pm.syncToAll();
+            }
+
+            case "remove_from_playlist" -> {
+                String[] parts = arg.split(":", 2);
+                if (parts.length == 2) {
+                    boolean ok = pm.removeSongFromPlaylist(parts[0], parts[1]);
+                    PlaylistManager.sendFeedback(player, ok ? "\u2714 Removed." : "\u26a0 Not found.");
+                    pm.syncToAll();
+                }
+            }
+
+            case "remove_from_library" -> {
+                boolean ok = pm.removeSong(arg);
+                PlaylistManager.sendFeedback(player, ok ? "\u2714 Removed: " + arg : "\u26a0 Not found.");
+                pm.syncToAll();
             }
 
             case "playlist_move_song" -> {
@@ -138,44 +163,21 @@ public class MusicServerMod implements ModInitializer {
                         int to   = Integer.parseInt(parts[2]);
                         boolean ok = pm.moveSongInPlaylist(parts[0], from, to);
                         PlaylistManager.sendFeedback(player, ok ? "\u2714 Reordered." : "\u26a0 Failed to reorder.");
-                        pm.syncToPlayer(player);
+                        pm.syncToAll(); // push updated order to everyone
                     } catch (NumberFormatException e) {
                         PlaylistManager.sendFeedback(player, "\u26a0 Invalid indices.");
                     }
                 }
             }
 
-            case "create" -> {
-                boolean ok = pm.createPlaylist(arg);
-                PlaylistManager.sendFeedback(player, ok ? "\u2714 Created: " + arg : "\u26a0 Already exists: " + arg);
-                pm.syncToPlayer(player);
-            }
-
-            case "delete" -> {
-                boolean ok = pm.deletePlaylist(arg);
-                PlaylistManager.sendFeedback(player, ok ? "\u2714 Deleted: " + arg : "\u26a0 Not found: " + arg);
-                pm.syncToPlayer(player);
-            }
-
-            case "remove_from_playlist" -> {
-                String[] parts = arg.split(":", 2);
-                if (parts.length == 2) {
-                    boolean ok = pm.removeSongFromPlaylist(parts[0], parts[1]);
-                    PlaylistManager.sendFeedback(player, ok ? "\u2714 Removed." : "\u26a0 Not found.");
-                    pm.syncToPlayer(player);
-                }
-            }
-
-            case "remove_from_library" -> {
-                boolean ok = pm.removeSong(arg);
-                PlaylistManager.sendFeedback(player, ok ? "\u2714 Removed: " + arg : "\u26a0 Not found.");
-                pm.syncToPlayer(player);
-            }
-
             case "song_finished" -> {
-                // Client reports natural end of song — advance playlist or stop
-                if (c.getActivePlaylist() != null) c.skipSong();
-                else c.stopAll();
+                // Arg = songSeq echoed from client; only act on the first client to
+                // report finish for this seq (ignores duplicates from other players).
+                try {
+                    int seq = arg.isEmpty() ? -1 : Integer.parseInt(arg);
+                    if (c.getActivePlaylist() != null) c.skipSongIfSeq(seq);
+                    else if (seq == c.getCurrentSongSeq()) c.stopAll();
+                } catch (NumberFormatException ignored) {}
             }
 
             default -> PlaylistManager.sendFeedback(player, "\u26a0 Unknown action: " + action);
