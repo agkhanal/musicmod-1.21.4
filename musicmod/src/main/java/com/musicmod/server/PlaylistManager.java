@@ -215,6 +215,16 @@ public class PlaylistManager {
         return Collections.unmodifiableCollection(new ArrayList<>(playlists.values()));
     }
 
+    public synchronized boolean addSongToPlaylist(String pl, String songName) {
+        Playlist p = getPlaylist(pl);
+        if (p == null) return false;
+        Playlist.Song s = getSongByDisplayName(songName);
+        if (s == null) return false;
+        p.addSong(s);
+        save();
+        return true;
+    }
+
     public synchronized boolean removeSongFromPlaylist(String pl, String songDisplayName) {
         Playlist p = getPlaylist(pl);
         if (p == null) return false;
