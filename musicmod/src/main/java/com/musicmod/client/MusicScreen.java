@@ -428,7 +428,13 @@ public class MusicScreen extends Screen {
     // ─── Actions ─────────────────────────────────────────────────────────────────
 
     private void onPlay() {
-        // If a song is selected in a playlist, play it specifically
+        // If paused, resume from current position instead of restarting
+        MusicPlayer player = MusicPlayer.get();
+        if (player.isPaused()) {
+            player.resume();
+            return;
+        }
+        // Start playing: specific song if selected, otherwise current playlist
         if (selectedPlaylist >= 0 && selectedSong >= 0) {
             onPlaySong();
         } else {

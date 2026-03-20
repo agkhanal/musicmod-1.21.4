@@ -105,17 +105,22 @@ public class MusicPlayer {
     /** Resume from where we paused. */
     public void resume() {
         if (stopped || !paused || currentUrl == null) return;
-        paused        = false;
-        playStartTime = System.currentTimeMillis();
 
         if (wavClip != null && wavClip.isOpen()) {
+            paused        = false;
+            playStartTime = System.currentTimeMillis();
             wavClip.start();
         } else {
-            // MP3: reconnect from byte offset saved when decode loop exited
-            final long   skipBytes = pausedBytes;
-            final String url       = currentUrl;
+            // MP3: submit task that runs AFTER the old decode loop exits (single-thread executor).
+            // Read pausedBytes and clear paused flag inside the task to avoid races —
+            // the decode loop sets pausedBytes just before it returns, so by the time
+            // this task runs, the value is guaranteed to be correct.
+            final String url = currentUrl;
             playFuture = executor.submit(() -> {
-                try { playMp3FromOffset(url, skipBytes); }
+                if (stopped) return;
+                paused        = false;
+                playStartTime = System.currentTimeMillis();
+                try { playMp3FromOffset(url, pausedBytes); }
                 catch (Exception e) {
                     if (!stopped) LOGGER.error("Resume error: {}", e.getMessage());
                 }
