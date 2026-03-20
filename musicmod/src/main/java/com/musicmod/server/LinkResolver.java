@@ -1,5 +1,7 @@
 package com.musicmod.server;
 
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.musicmod.common.MusicConfig;
 import com.musicmod.common.Playlist;
 import org.slf4j.Logger;
@@ -263,11 +265,30 @@ public class LinkResolver {
             HttpURLConnection trackConn = (HttpURLConnection)
                     new URL("https://api.spotify.com/v1/tracks/" + trackId).openConnection();
             trackConn.setRequestProperty("Authorization", "Bearer " + accessToken);
+            trackConn.setConnectTimeout(8000);
+            trackConn.setReadTimeout(8000);
+            if (trackConn.getResponseCode() != 200) {
+                LOGGER.error("Spotify API returned HTTP {}", trackConn.getResponseCode());
+                return null;
+            }
             String trackJson = new String(trackConn.getInputStream().readAllBytes());
+
+            // Use Gson to parse properly — the raw JSON has "album":{"name":"Album Name",...}
+            // before the top-level "name":"Track Title", so naive string search gets the
+            // album name instead of the track title.
+            JsonObject obj = JsonParser.parseString(trackJson).getAsJsonObject();
             SpotifyTrackInfo info = new SpotifyTrackInfo();
-            info.title  = extractJsonField(trackJson, "name");
-            info.artist = extractJsonField(trackJson, "name", trackJson.indexOf("\"artists\""));
-            return info.title != null ? info : null;
+            info.title = obj.has("name") ? obj.get("name").getAsString() : null;
+            if (obj.has("artists") && obj.getAsJsonArray("artists").size() > 0) {
+                info.artist = obj.getAsJsonArray("artists")
+                        .get(0).getAsJsonObject().get("name").getAsString();
+            }
+            if (info.title == null || info.artist == null) {
+                LOGGER.error("Spotify track JSON missing title or artist for {}", trackId);
+                return null;
+            }
+            LOGGER.info("Spotify resolved: '{}' by '{}'", info.title, info.artist);
+            return info;
         } catch (Exception e) {
             LOGGER.error("Spotify API error: {}", e.getMessage());
             return null;
@@ -275,11 +296,19 @@ public class LinkResolver {
     }
 
     private String searchYouTube(String query, MusicConfig cfg) throws Exception {
-        // ytmsearch1 searches YouTube Music — far more accurate for songs than plain
-        // YouTube search because YTM has official "Artist - Topic" audio uploads.
-        List<String> cmd = List.of(cfg.ytDlpPath, "--get-id", "--no-playlist",
+        // Try YouTube Music first — it has official Artist-Topic uploads and is far more
+        // accurate for songs than plain YouTube search.
+        List<String> ytmCmd = List.of(cfg.ytDlpPath, "--get-id", "--no-playlist",
                 "--default-search", "ytmsearch1", query);
-        String videoId = runProcess(cmd, cfg.resolveTimeoutSeconds);
+        String videoId = runProcess(ytmCmd, cfg.resolveTimeoutSeconds);
+        if (videoId != null && !videoId.isBlank()) {
+            return "https://www.youtube.com/watch?v=" + videoId.trim();
+        }
+        // Fallback to plain YouTube search
+        LOGGER.info("YouTube Music search returned nothing for '{}', falling back to YouTube", query);
+        List<String> ytCmd = List.of(cfg.ytDlpPath, "--get-id", "--no-playlist",
+                "--default-search", "ytsearch1", query);
+        videoId = runProcess(ytCmd, cfg.resolveTimeoutSeconds);
         return (videoId != null && !videoId.isBlank())
                 ? "https://www.youtube.com/watch?v=" + videoId.trim() : null;
     }

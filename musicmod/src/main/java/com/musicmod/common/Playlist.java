@@ -23,6 +23,7 @@ public class Playlist {
 
     public void addSong(Song song)         { songs.add(song); }
     public boolean removeSong(String name) { return songs.removeIf(s -> s.getDisplayName().equalsIgnoreCase(name)); }
+    public void clearSongs()               { songs.clear(); currentIndex = 0; }
     public void reset()                    { currentIndex = 0; }
     public int size()                      { return songs.size(); }
     public int getCurrentIndex()           { return currentIndex; }
