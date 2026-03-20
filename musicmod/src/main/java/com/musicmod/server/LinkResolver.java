@@ -275,8 +275,10 @@ public class LinkResolver {
     }
 
     private String searchYouTube(String query, MusicConfig cfg) throws Exception {
+        // ytmsearch1 searches YouTube Music — far more accurate for songs than plain
+        // YouTube search because YTM has official "Artist - Topic" audio uploads.
         List<String> cmd = List.of(cfg.ytDlpPath, "--get-id", "--no-playlist",
-                "--default-search", "ytsearch1", query);
+                "--default-search", "ytmsearch1", query);
         String videoId = runProcess(cmd, cfg.resolveTimeoutSeconds);
         return (videoId != null && !videoId.isBlank())
                 ? "https://www.youtube.com/watch?v=" + videoId.trim() : null;
