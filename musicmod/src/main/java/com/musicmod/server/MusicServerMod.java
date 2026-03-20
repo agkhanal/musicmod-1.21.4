@@ -170,6 +170,18 @@ public class MusicServerMod implements ModInitializer {
                 }
             }
 
+            case "clear_playlist" -> {
+                pm.clearPlaylist(arg);
+                PlaylistManager.sendFeedback(player, "\u2714 Cleared all songs from: " + arg);
+                pm.syncToAll();
+            }
+
+            case "clear_library" -> {
+                pm.clearLibrary();
+                PlaylistManager.sendFeedback(player, "\u2714 Library cleared.");
+                pm.syncToAll();
+            }
+
             case "song_finished" -> {
                 // Arg = songSeq echoed from client; only act on the first client to
                 // report finish for this seq (ignores duplicates from other players).

@@ -150,16 +150,18 @@ public class MusicScreen extends Screen {
                 .dimensions(cx + 36, ctrlY, 50, 14).build());
 
         // Playlist controls
-        addDrawableChild(ButtonWidget.builder(Text.literal("\u25b6 Play"), btn -> onPlayPlaylist())   .dimensions(8,  panelBot - 18, 54, 14).build());
-        addDrawableChild(ButtonWidget.builder(Text.literal("+ New"),        btn -> onCreatePlaylist()) .dimensions(66, panelBot - 18, 50, 14).build());
-        addDrawableChild(ButtonWidget.builder(Text.literal("\u2715"),        btn -> onDeletePlaylist()) .dimensions(120,panelBot - 18, 18, 14).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("\u25b6 Play"), btn -> onPlayPlaylist())      .dimensions(8,   panelBot - 18, 54, 14).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("+ New"),        btn -> onCreatePlaylist())    .dimensions(66,  panelBot - 18, 50, 14).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("\u2715"),        btn -> onDeletePlaylist())    .dimensions(120, panelBot - 18, 18, 14).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("Clr"),           btn -> onClearPlaylistSongs()).dimensions(142, panelBot - 18, 28, 14).build());
 
-        // Song controls
+        // Song controls — two rows so Clear All doesn't crowd the row with Remove
         int songCtrlX = PANEL_W + 16;
-        addDrawableChild(ButtonWidget.builder(Text.literal("\u25b6"),  btn -> onPlaySong())     .dimensions(songCtrlX,      panelBot - 18, 24, 14).build());
-        addDrawableChild(ButtonWidget.builder(Text.literal("\u2191"),  btn -> onMoveSongUp())   .dimensions(songCtrlX + 28, panelBot - 18, 24, 14).build());
-        addDrawableChild(ButtonWidget.builder(Text.literal("\u2193"),  btn -> onMoveSongDown()) .dimensions(songCtrlX + 56, panelBot - 18, 24, 14).build());
-        addDrawableChild(ButtonWidget.builder(Text.literal("Remove"),  btn -> onRemoveSong())   .dimensions(songCtrlX + 84, panelBot - 18, 56, 14).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("\u25b6"),   btn -> onPlaySong())      .dimensions(songCtrlX,      panelBot - 36, 24, 14).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("\u2191"),   btn -> onMoveSongUp())    .dimensions(songCtrlX + 28, panelBot - 36, 24, 14).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("\u2193"),   btn -> onMoveSongDown())  .dimensions(songCtrlX + 56, panelBot - 36, 24, 14).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("Remove"),   btn -> onRemoveSong())    .dimensions(songCtrlX + 84, panelBot - 36, 56, 14).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("Clear All"), btn -> onClearAllSongs()).dimensions(songCtrlX + 84, panelBot - 18, 66, 14).build());
 
         // HUD settings panel widgets (only when showSettings)
         if (showSettings) addHudSettingsWidgets(footerY);
@@ -365,7 +367,7 @@ public class MusicScreen extends Screen {
             return true;
         }
 
-        // Playlist panel click — exclude button row at panelBot-22 to panelBot
+        // Playlist panel click — exclude single button row (panelBot-22 to panelBot)
         if (mx >= 6 && mx <= PANEL_W + 2 && my >= rowTop && my < panelBot - 22) {
             int idx = (int)(my - rowTop) / ROW_H + playlistScroll;
             if (idx >= 0 && idx < playlists.size()) {
@@ -375,8 +377,8 @@ public class MusicScreen extends Screen {
             }
         }
 
-        // Song panel click — exclude button row at panelBot-22 to panelBot
-        if (mx >= rightX + 2 && mx <= rightX + rightW - 2 && my >= rowTop && my < panelBot - 22) {
+        // Song panel click — exclude two button rows (panelBot-40 to panelBot)
+        if (mx >= rightX + 2 && mx <= rightX + rightW - 2 && my >= rowTop && my < panelBot - 40) {
             int idx = (int)(my - rowTop) / ROW_H + songScroll;
             List<SongEntry> songs = getDisplaySongs();
             if (idx >= 0 && idx < songs.size()) {
@@ -526,6 +528,30 @@ public class MusicScreen extends Screen {
         else
             sendAction("remove_from_library", song);
         selectedSong = -1;
+    }
+
+    private void onClearPlaylistSongs() {
+        if (selectedPlaylist < 0 || selectedPlaylist >= playlists.size()) {
+            setFeedback("\u26a0 Select a playlist first.");
+            return;
+        }
+        String name = playlists.get(selectedPlaylist).name();
+        sendAction("clear_playlist", name);
+        selectedSong = -1;
+        setFeedback("\u26a0 Cleared all songs from: " + name);
+    }
+
+    private void onClearAllSongs() {
+        if (selectedPlaylist >= 0 && selectedPlaylist < playlists.size()) {
+            String name = playlists.get(selectedPlaylist).name();
+            sendAction("clear_playlist", name);
+            selectedSong = -1;
+            setFeedback("\u26a0 Cleared all songs from: " + name);
+        } else {
+            sendAction("clear_library", "");
+            selectedSong = -1;
+            setFeedback("\u26a0 Library cleared.");
+        }
     }
 
     private void sendAction(String action, String arg) {

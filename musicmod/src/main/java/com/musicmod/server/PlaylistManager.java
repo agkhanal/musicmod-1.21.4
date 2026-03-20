@@ -241,6 +241,19 @@ public class PlaylistManager {
         return ok;
     }
 
+    public synchronized void clearPlaylist(String name) {
+        Playlist p = getPlaylist(name);
+        if (p == null) return;
+        p.clearSongs();
+        save();
+    }
+
+    public synchronized void clearLibrary() {
+        library.clear();
+        for (Playlist pl : playlists.values()) pl.clearSongs();
+        save();
+    }
+
     // ── Sync ─────────────────────────────────────────────────────────────────
 
     public void syncToPlayer(ServerPlayerEntity player) {
