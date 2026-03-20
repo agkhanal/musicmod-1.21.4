@@ -45,7 +45,7 @@ public class MusicPlayer {
     private volatile boolean paused        = false;
 
     // Active playback handles
-    private SourceDataLine mp3Line;
+    private volatile SourceDataLine mp3Line;
     private Clip            wavClip;
     private Future<?>       playFuture;
 
@@ -98,8 +98,11 @@ public class MusicPlayer {
         if (wavClip != null && wavClip.isOpen()) {
             wavClip.stop(); // position is preserved in Clip
         }
-        // For MP3: the decode loop checks `paused` each frame and exits cleanly;
-        // pausedBytes is updated when the loop exits.
+        // Stop the MP3 line immediately so its frame-position counter freezes at the
+        // last played frame.  The decode loop will use that frozen position to compute
+        // the correct pausedBytes, excluding any PCM that was buffered but not played.
+        SourceDataLine line = mp3Line;
+        if (line != null) line.stop();
     }
 
     /** Resume from where we paused. */
@@ -117,7 +120,8 @@ public class MusicPlayer {
             // this task runs, the value is guaranteed to be correct.
             final String url = currentUrl;
             playFuture = executor.submit(() -> {
-                if (stopped) return;
+                // If pause() was called again before this task ran, stay paused.
+                if (stopped || paused) return;
                 paused        = false;
                 playStartTime = System.currentTimeMillis();
                 try { playMp3FromOffset(url, pausedBytes); }
@@ -204,6 +208,7 @@ public class MusicPlayer {
         URLConnection conn = null;
         SourceDataLine line = null;
         Bitstream bitstream = null;
+        long totalPcmBytesWritten = 0;
         try {
             conn = new URL(url).openConnection();
             conn.setConnectTimeout(8000);
@@ -252,11 +257,33 @@ public class MusicPlayer {
                     pcm[i * 2]     = (byte)(scaled & 0xFF);
                     pcm[i * 2 + 1] = (byte)((scaled >> 8) & 0xFF);
                 }
-                line.write(pcm, 0, pcm.length);
+                int written = line.write(pcm, 0, pcm.length);
+                totalPcmBytesWritten += written;
                 bitstream.closeFrame();
             }
 
-            pausedBytes = countingStream.getCount();
+            // Compute the correct resume position.
+            // pausedBytes must reflect bytes *played*, not bytes *read from stream*.
+            // The SourceDataLine has an internal PCM buffer; frames written there but
+            // not yet emitted are the source of the "skip forward on spam" bug.
+            // pause() already called line.stop(), freezing getLongFramePosition().
+            if (paused && line != null && totalPcmBytesWritten > 0) {
+                long playedPcmBytes = line.getLongFramePosition()
+                        * (long) line.getFormat().getFrameSize();
+                long flushedPcmBytes = totalPcmBytesWritten - playedPcmBytes;
+                if (flushedPcmBytes > 0) {
+                    // Convert flushed PCM bytes back to compressed-stream bytes using
+                    // the average compression ratio for this segment (exact for CBR,
+                    // a close approximation for VBR).
+                    long compressedInSegment = countingStream.getCount() - skipBytes;
+                    double ratio = (double) compressedInSegment / totalPcmBytesWritten;
+                    pausedBytes = countingStream.getCount() - Math.round(flushedPcmBytes * ratio);
+                } else {
+                    pausedBytes = countingStream.getCount();
+                }
+            } else {
+                pausedBytes = countingStream.getCount();
+            }
 
             // Drain only if we finished naturally (not stopped/paused)
             if (!stopped && !paused && line != null) {
@@ -268,7 +295,7 @@ public class MusicPlayer {
             if (!stopped && !paused) LOGGER.error("MP3 error: {}", e.getMessage());
         } finally {
             if (line != null) {
-                try { line.stop(); line.close(); } catch (Exception ignored) {}
+                try { line.stop(); line.flush(); line.close(); } catch (Exception ignored) {}
                 if (mp3Line == line) mp3Line = null;
             }
             if (bitstream != null) {
