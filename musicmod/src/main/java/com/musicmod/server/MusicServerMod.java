@@ -40,6 +40,8 @@ public class MusicServerMod implements ModInitializer {
         // ── Lifecycle ─────────────────────────────────────────────────────────────
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
             MusicSessionController.get().setServer(server);
+            // Kick off background resolution of all library songs so they aren't greyed-out on rejoin.
+            PlaylistManager.get().resolveAllAsync();
             LOGGER.info("ServerMusicPlayer ready. yt-dlp: {}", MusicConfig.get().ytDlpPath);
         });
 
