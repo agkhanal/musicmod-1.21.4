@@ -43,6 +43,7 @@ public class MusicPlayer {
     private volatile boolean muted         = false;
     private volatile boolean stopped       = false;
     private volatile boolean paused        = false;
+    private volatile boolean pendingResume = false;
 
     // Active playback handles
     private volatile SourceDataLine mp3Line;
@@ -81,8 +82,9 @@ public class MusicPlayer {
 
     /** Stop completely and clear all state. */
     public void stop() {
-        stopped = true;
-        paused  = false;
+        stopped       = true;
+        paused        = false;
+        pendingResume = false;
         stopCurrentHandles();
         currentUrl     = null;
         pausedElapsed  = 0;
@@ -94,6 +96,7 @@ public class MusicPlayer {
     public void pause() {
         if (stopped || paused || currentUrl == null) return;
         paused = true;
+        pendingResume = false;
         pausedElapsed += System.currentTimeMillis() - playStartTime;
         if (wavClip != null && wavClip.isOpen()) {
             wavClip.stop(); // position is preserved in Clip
@@ -111,17 +114,20 @@ public class MusicPlayer {
 
         if (wavClip != null && wavClip.isOpen()) {
             paused        = false;
+            pendingResume = false;
             playStartTime = System.currentTimeMillis();
             wavClip.start();
         } else {
             // MP3: submit task that runs AFTER the old decode loop exits (single-thread executor).
-            // Read pausedBytes and clear paused flag inside the task to avoid races —
-            // the decode loop sets pausedBytes just before it returns, so by the time
-            // this task runs, the value is guaranteed to be correct.
+            // We use pendingResume (not paused) as the "still want to resume" signal so the
+            // decode loop can still see paused==true when computing pausedBytes, while the task
+            // can distinguish a genuine resume from a re-pause that arrived before it ran.
+            pendingResume = true;
             final String url = currentUrl;
             playFuture = executor.submit(() -> {
-                // If pause() was called again before this task ran, stay paused.
-                if (stopped || paused) return;
+                // If stop() or pause() was called again before this task ran, bail out.
+                if (stopped || !pendingResume) return;
+                pendingResume = false;
                 paused        = false;
                 playStartTime = System.currentTimeMillis();
                 try { playMp3FromOffset(url, pausedBytes); }
