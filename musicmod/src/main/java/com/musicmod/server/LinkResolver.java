@@ -1,5 +1,7 @@
 package com.musicmod.server;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.musicmod.common.MusicConfig;
@@ -422,10 +424,25 @@ public class LinkResolver {
     }
 
     private List<String> extractSpotifyPlaylistUrls(String url, MusicConfig cfg) {
-        if (!cfg.hasSpotifyCredentials()) {
-            LOGGER.error("Spotify credentials required to import Spotify playlists/albums.");
-            return List.of();
+        // Try Spotify Web API first (most reliable when credentials are available)
+        if (cfg.hasSpotifyCredentials()) {
+            List<String> apiResult = extractSpotifyViaApi(url, cfg);
+            if (!apiResult.isEmpty()) return apiResult;
+            LOGGER.warn("Spotify API extraction failed, falling back to yt-dlp.");
         }
+
+        // Fallback: yt-dlp can handle Spotify in some configurations
+        List<String> ytdlpResult = extractPlaylistViaYtDlp(url, cfg);
+        if (!ytdlpResult.isEmpty()) return ytdlpResult;
+
+        if (!cfg.hasSpotifyCredentials()) {
+            LOGGER.error("No tracks found from Spotify URL. Add spotifyClientId and " +
+                    "spotifyClientSecret to musicmod_config.json to enable Spotify imports.");
+        }
+        return List.of();
+    }
+
+    private List<String> extractSpotifyViaApi(String url, MusicConfig cfg) {
         try {
             String accessToken = getSpotifyAccessToken(cfg);
             if (accessToken == null) return List.of();
@@ -450,44 +467,52 @@ public class LinkResolver {
                 if (conn.getResponseCode() != 200) break;
                 String json = new String(conn.getInputStream().readAllBytes());
 
-                // Extract track IDs — both playlist items (track.id) and album items (id)
-                int searchFrom = 0;
-                String idKey = type.equals("album") ? "\"id\"" : "\"id\"";
-                // For playlists items contain {"track": {"id": "..."}}; for albums {"id": "..."}
-                // We walk "items" array and extract track IDs
-                int itemsIdx = json.indexOf("\"items\"");
-                if (itemsIdx < 0) break;
-                int arrayStart = json.indexOf('[', itemsIdx);
-                int arrayEnd   = findMatchingBracket(json, arrayStart, '[', ']');
-                String itemsJson = arrayStart >= 0 && arrayEnd > arrayStart
-                        ? json.substring(arrayStart, arrayEnd + 1) : "";
+                JsonObject page = JsonParser.parseString(json).getAsJsonObject();
+                JsonArray items = page.has("items") ? page.getAsJsonArray("items") : null;
+                if (items == null) break;
 
-                // Walk items and find each track id
-                int pos = 0;
-                while (pos < itemsJson.length()) {
-                    // For playlists: find "track":{..."id":"..."}
-                    // For albums:    find "id":"..."
-                    int trackId_idx;
-                    if (type.equals("playlist")) {
-                        int trackObj = itemsJson.indexOf("\"track\"", pos);
-                        if (trackObj < 0) break;
-                        trackId_idx = trackObj;
-                    } else {
-                        trackId_idx = pos;
-                    }
-                    String tid = extractJsonField(itemsJson, "id", trackId_idx);
-                    if (tid == null) break;
-                    trackUrls.add("https://open.spotify.com/track/" + tid);
-                    pos = itemsJson.indexOf(tid, trackId_idx) + tid.length();
+                for (JsonElement itemEl : items) {
+                    if (itemEl.isJsonNull()) continue;
+                    JsonObject item = itemEl.getAsJsonObject();
+
+                    // Playlist pages wrap each track: { "track": { "id": "...", ... } }
+                    // Album pages ARE the track object:  { "id": "...", ... }
+                    JsonObject track = type.equals("playlist")
+                            ? (item.has("track") && !item.get("track").isJsonNull()
+                                    ? item.getAsJsonObject("track") : null)
+                            : item;
+
+                    if (track == null || !track.has("id") || track.get("id").isJsonNull()) continue;
+                    String tid = track.get("id").getAsString();
+                    if (!tid.isBlank()) trackUrls.add("https://open.spotify.com/track/" + tid);
                 }
 
-                // Pagination
-                String nextField = extractJsonField(json, "next");
-                nextUrl = (nextField != null && !nextField.isEmpty()) ? nextField : null;
+                // Pagination — "next" is null when on the last page
+                nextUrl = (page.has("next") && !page.get("next").isJsonNull())
+                        ? page.get("next").getAsString() : null;
             }
             return trackUrls;
         } catch (Exception e) {
-            LOGGER.error("Spotify playlist extraction failed: {}", e.getMessage());
+            LOGGER.error("Spotify API extraction failed: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /** Generic yt-dlp flat-playlist extraction; used as a fallback for Spotify. */
+    private List<String> extractPlaylistViaYtDlp(String url, MusicConfig cfg) {
+        try {
+            List<String> cmd = List.of(cfg.ytDlpPath,
+                    "--flat-playlist", "--get-url", "--no-warnings", url);
+            String output = runProcess(cmd, cfg.resolveTimeoutSeconds * 10);
+            if (output == null || output.isBlank()) return List.of();
+            List<String> urls = new ArrayList<>();
+            for (String line : output.split("\n")) {
+                String trimmed = line.trim();
+                if (!trimmed.isEmpty()) urls.add(trimmed);
+            }
+            return urls;
+        } catch (Exception e) {
+            LOGGER.warn("yt-dlp extraction failed for {}: {}", url, e.getMessage());
             return List.of();
         }
     }
@@ -510,8 +535,13 @@ public class LinkResolver {
             conn.setReadTimeout(8000);
             if (conn.getResponseCode() != 200) return "Spotify Import";
             String json = new String(conn.getInputStream().readAllBytes());
-            String title = extractJsonField(json, "name");
-            return title != null && !title.isEmpty() ? title : "Spotify Import";
+            // Use Gson to get the top-level "name" field only (not nested artist/track names)
+            JsonObject obj = JsonParser.parseString(json).getAsJsonObject();
+            if (obj.has("name") && !obj.get("name").isJsonNull()) {
+                String title = obj.get("name").getAsString();
+                if (!title.isBlank()) return title;
+            }
+            return "Spotify Import";
         } catch (Exception e) {
             return "Spotify Import";
         }
@@ -534,20 +564,6 @@ public class LinkResolver {
             LOGGER.error("Failed to get Spotify access token: {}", e.getMessage());
             return null;
         }
-    }
-
-    /** Find the index of the closing bracket matching the opening bracket at startIdx. */
-    private static int findMatchingBracket(String s, int startIdx, char open, char close) {
-        if (startIdx < 0 || startIdx >= s.length() || s.charAt(startIdx) != open) return -1;
-        int depth = 0;
-        for (int i = startIdx; i < s.length(); i++) {
-            if (s.charAt(i) == open)  depth++;
-            else if (s.charAt(i) == close) {
-                depth--;
-                if (depth == 0) return i;
-            }
-        }
-        return -1;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
