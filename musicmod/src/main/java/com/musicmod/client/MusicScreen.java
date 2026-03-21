@@ -149,11 +149,14 @@ public class MusicScreen extends Screen {
         addDrawableChild(ButtonWidget.builder(Text.literal("\u2699 HUD"), btn -> { showSettings = !showSettings; clearAndRebuild(); })
                 .dimensions(cx + 36, ctrlY, 50, 14).build());
 
-        // Playlist controls
-        addDrawableChild(ButtonWidget.builder(Text.literal("\u25b6 Play"), btn -> onPlayPlaylist())      .dimensions(8,   panelBot - 18, 54, 14).build());
-        addDrawableChild(ButtonWidget.builder(Text.literal("+ New"),        btn -> onCreatePlaylist())    .dimensions(66,  panelBot - 18, 50, 14).build());
-        addDrawableChild(ButtonWidget.builder(Text.literal("\u2715"),        btn -> onDeletePlaylist())    .dimensions(120, panelBot - 18, 18, 14).build());
-        addDrawableChild(ButtonWidget.builder(Text.literal("Clr"),           btn -> onClearPlaylistSongs()).dimensions(142, panelBot - 18, 28, 14).build());
+        // Playlist controls — row 1
+        addDrawableChild(ButtonWidget.builder(Text.literal("\u25b6 Play"), btn -> onPlayPlaylist())      .dimensions(8,   panelBot - 36, 54, 14).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("+ New"),        btn -> onCreatePlaylist())    .dimensions(66,  panelBot - 36, 50, 14).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("\u2715"),        btn -> onDeletePlaylist())    .dimensions(120, panelBot - 36, 18, 14).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("Clr"),           btn -> onClearPlaylistSongs()).dimensions(142, panelBot - 36, 28, 14).build());
+        // Playlist controls — row 2 (shuffle toggle)
+        String shuffleLabel = getShuffleLabel();
+        addDrawableChild(ButtonWidget.builder(Text.literal(shuffleLabel),   btn -> onToggleShuffle())    .dimensions(8,   panelBot - 18, 80, 14).build());
 
         // Song controls — two rows so Clear All doesn't crowd the row with Remove
         int songCtrlX = PANEL_W + 16;
@@ -367,8 +370,8 @@ public class MusicScreen extends Screen {
             return true;
         }
 
-        // Playlist panel click — exclude single button row (panelBot-22 to panelBot)
-        if (mx >= 6 && mx <= PANEL_W + 2 && my >= rowTop && my < panelBot - 22) {
+        // Playlist panel click — exclude two button rows (panelBot-40 to panelBot)
+        if (mx >= 6 && mx <= PANEL_W + 2 && my >= rowTop && my < panelBot - 40) {
             int idx = (int)(my - rowTop) / ROW_H + playlistScroll;
             if (idx >= 0 && idx < playlists.size()) {
                 selectedPlaylist = idx; selectedSong = -1; songScroll = 0;
@@ -528,6 +531,21 @@ public class MusicScreen extends Screen {
         else
             sendAction("remove_from_library", song);
         selectedSong = -1;
+    }
+
+    private String getShuffleLabel() {
+        if (selectedPlaylist >= 0 && selectedPlaylist < playlists.size())
+            return playlists.get(selectedPlaylist).shuffle()
+                    ? "\ud83d\udd00 Shuffle: ON" : "\ud83d\udd00 Shuffle: OFF";
+        return "\ud83d\udd00 Shuffle";
+    }
+
+    private void onToggleShuffle() {
+        if (selectedPlaylist < 0 || selectedPlaylist >= playlists.size()) {
+            setFeedback("\u26a0 Select a playlist first.");
+            return;
+        }
+        sendAction("shuffle_toggle", playlists.get(selectedPlaylist).name());
     }
 
     private void onClearPlaylistSongs() {

@@ -365,33 +365,47 @@ public class LinkResolver {
         return false;
     }
 
+    /** A track URL plus an optional pre-fetched display name (may be null). */
+    public record TrackEntry(String url, String name) {
+        public TrackEntry(String url) { this(url, null); }
+    }
+
     /**
-     * Extracts individual track URLs from a playlist URL.
-     * For YouTube/SoundCloud: uses yt-dlp --flat-playlist --get-url.
-     * For Spotify: uses the Spotify Web API (credentials required).
-     *
-     * @return list of individual track URLs, empty on failure.
+     * Extracts individual track entries (URL + pre-fetched name when available) from a
+     * playlist URL.  For Spotify the Spotify API response already contains track names,
+     * so they are returned here and can be used to immediately show proper titles without
+     * waiting for the full yt-dlp download/upload resolution.
      */
-    public List<String> extractPlaylistUrls(String url, MusicConfig cfg) {
+    public List<TrackEntry> extractPlaylistEntries(String url, MusicConfig cfg) {
         if (url.contains("spotify.com")) {
-            return extractSpotifyPlaylistUrls(url, cfg);
+            return extractSpotifyPlaylistEntries(url, cfg);
         }
-        // YouTube and SoundCloud: yt-dlp handles flat playlist extraction natively
+        // YouTube / SoundCloud: yt-dlp returns URLs only, no titles in flat mode
         try {
             List<String> cmd = List.of(cfg.ytDlpPath,
                     "--flat-playlist", "--get-url", "--no-warnings", url);
             String output = runProcess(cmd, cfg.resolveTimeoutSeconds * 10);
             if (output == null || output.isBlank()) return List.of();
-            List<String> urls = new ArrayList<>();
+            List<TrackEntry> entries = new ArrayList<>();
             for (String line : output.split("\n")) {
                 String trimmed = line.trim();
-                if (!trimmed.isEmpty()) urls.add(trimmed);
+                if (!trimmed.isEmpty()) entries.add(new TrackEntry(trimmed));
             }
-            return urls;
+            return entries;
         } catch (Exception e) {
-            LOGGER.error("Failed to extract playlist URLs from {}: {}", url, e.getMessage());
+            LOGGER.error("Failed to extract playlist entries from {}: {}", url, e.getMessage());
             return List.of();
         }
+    }
+
+    /**
+     * Convenience wrapper used by callers that only need URLs.
+     */
+    public List<String> extractPlaylistUrls(String url, MusicConfig cfg) {
+        List<TrackEntry> entries = extractPlaylistEntries(url, cfg);
+        List<String> urls = new ArrayList<>(entries.size());
+        for (TrackEntry e : entries) urls.add(e.url());
+        return urls;
     }
 
     /**
@@ -423,16 +437,16 @@ public class LinkResolver {
         } catch (Exception e) { return "Imported Playlist"; }
     }
 
-    private List<String> extractSpotifyPlaylistUrls(String url, MusicConfig cfg) {
-        // Try Spotify Web API first (most reliable when credentials are available)
+    private List<TrackEntry> extractSpotifyPlaylistEntries(String url, MusicConfig cfg) {
+        // Try Spotify Web API first — it provides track names so songs show properly immediately
         if (cfg.hasSpotifyCredentials()) {
-            List<String> apiResult = extractSpotifyViaApi(url, cfg);
+            List<TrackEntry> apiResult = extractSpotifyViaApi(url, cfg);
             if (!apiResult.isEmpty()) return apiResult;
             LOGGER.warn("Spotify API extraction failed, falling back to yt-dlp.");
         }
 
-        // Fallback: yt-dlp can handle Spotify in some configurations
-        List<String> ytdlpResult = extractPlaylistViaYtDlp(url, cfg);
+        // Fallback: yt-dlp (no names available via this path)
+        List<TrackEntry> ytdlpResult = extractPlaylistViaYtDlp(url, cfg);
         if (!ytdlpResult.isEmpty()) return ytdlpResult;
 
         if (!cfg.hasSpotifyCredentials()) {
@@ -442,7 +456,7 @@ public class LinkResolver {
         return List.of();
     }
 
-    private List<String> extractSpotifyViaApi(String url, MusicConfig cfg) {
+    private List<TrackEntry> extractSpotifyViaApi(String url, MusicConfig cfg) {
         try {
             String accessToken = getSpotifyAccessToken(cfg);
             if (accessToken == null) return List.of();
@@ -457,7 +471,7 @@ public class LinkResolver {
                     + (type.equals("album") ? "albums/" : "playlists/")
                     + id + "/tracks?limit=50";
 
-            List<String> trackUrls = new ArrayList<>();
+            List<TrackEntry> entries = new ArrayList<>();
             String nextUrl = apiBase;
             while (nextUrl != null) {
                 HttpURLConnection conn = (HttpURLConnection) new URL(nextUrl).openConnection();
@@ -484,14 +498,30 @@ public class LinkResolver {
 
                     if (track == null || !track.has("id") || track.get("id").isJsonNull()) continue;
                     String tid = track.get("id").getAsString();
-                    if (!tid.isBlank()) trackUrls.add("https://open.spotify.com/track/" + tid);
+                    if (tid.isBlank()) continue;
+
+                    // Build a human-readable name from the Spotify response so songs show
+                    // proper titles immediately, without waiting for yt-dlp resolution.
+                    String displayName = null;
+                    if (track.has("name") && !track.get("name").isJsonNull()) {
+                        String trackName = track.get("name").getAsString();
+                        String artist = "";
+                        if (track.has("artists") && track.getAsJsonArray("artists").size() > 0) {
+                            JsonObject a = track.getAsJsonArray("artists").get(0).getAsJsonObject();
+                            if (a.has("name") && !a.get("name").isJsonNull())
+                                artist = a.get("name").getAsString();
+                        }
+                        displayName = artist.isEmpty() ? trackName : artist + " - " + trackName;
+                    }
+
+                    entries.add(new TrackEntry("https://open.spotify.com/track/" + tid, displayName));
                 }
 
                 // Pagination — "next" is null when on the last page
                 nextUrl = (page.has("next") && !page.get("next").isJsonNull())
                         ? page.get("next").getAsString() : null;
             }
-            return trackUrls;
+            return entries;
         } catch (Exception e) {
             LOGGER.error("Spotify API extraction failed: {}", e.getMessage());
             return List.of();
@@ -499,18 +529,18 @@ public class LinkResolver {
     }
 
     /** Generic yt-dlp flat-playlist extraction; used as a fallback for Spotify. */
-    private List<String> extractPlaylistViaYtDlp(String url, MusicConfig cfg) {
+    private List<TrackEntry> extractPlaylistViaYtDlp(String url, MusicConfig cfg) {
         try {
             List<String> cmd = List.of(cfg.ytDlpPath,
                     "--flat-playlist", "--get-url", "--no-warnings", url);
             String output = runProcess(cmd, cfg.resolveTimeoutSeconds * 10);
             if (output == null || output.isBlank()) return List.of();
-            List<String> urls = new ArrayList<>();
+            List<TrackEntry> entries = new ArrayList<>();
             for (String line : output.split("\n")) {
                 String trimmed = line.trim();
-                if (!trimmed.isEmpty()) urls.add(trimmed);
+                if (!trimmed.isEmpty()) entries.add(new TrackEntry(trimmed));
             }
-            return urls;
+            return entries;
         } catch (Exception e) {
             LOGGER.warn("yt-dlp extraction failed for {}: {}", url, e.getMessage());
             return List.of();
