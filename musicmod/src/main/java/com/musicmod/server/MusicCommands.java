@@ -3,12 +3,15 @@ package com.musicmod.server;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.musicmod.common.MusicConfig;
 import com.musicmod.common.Playlist;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.minecraft.command.CommandRegistryAccess;
 import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.text.Text;
+
+import java.util.concurrent.CompletableFuture;
 
 import static net.minecraft.server.command.CommandManager.*;
 
@@ -340,6 +343,111 @@ public class MusicCommands {
                             return 1;
                         })
                     )
+                )
+            )
+
+            // ── /music spotify … ─────────────────────────────────────────────────
+            // Handles the one-time OAuth flow for private Spotify playlist access.
+            .then(literal("spotify")
+                .requires(s -> s.hasPermissionLevel(4))
+
+                // /music spotify auth
+                // Starts a temporary localhost callback server, then prints the
+                // Spotify authorization URL to the player. The user opens it in a
+                // browser on the server machine; after approving, the server captures
+                // the code automatically, exchanges it for a refresh token, and saves it.
+                .then(literal("auth")
+                    .executes(ctx -> {
+                        MusicConfig cfg = MusicConfig.get();
+                        if (!cfg.hasSpotifyCredentials()) {
+                            ctx.getSource().sendError(Text.literal(
+                                "Set spotifyClientId and spotifyClientSecret in musicmod.json first."));
+                            return 0;
+                        }
+                        String authUrl = LinkResolver.get().generateSpotifyAuthUrl(cfg);
+                        if (authUrl == null) {
+                            ctx.getSource().sendError(Text.literal("Failed to generate auth URL."));
+                            return 0;
+                        }
+                        ServerCommandSource src = ctx.getSource();
+                        // Start the callback listener in the background before printing the URL
+                        LinkResolver.get().startOAuthCallbackServer(cfg, code -> {
+                            if (code == null) {
+                                src.getServer().execute(() -> src.sendFeedback(() -> Text.literal(
+                                    "⚠ OAuth timed out or failed. Run /music spotify auth again, " +
+                                    "or use /music spotify code <code> to enter the code manually."), false));
+                                return;
+                            }
+                            CompletableFuture.supplyAsync(() ->
+                                    LinkResolver.get().exchangeSpotifyAuthCode(code, cfg))
+                                .thenAccept(token -> src.getServer().execute(() -> {
+                                    if (token != null) {
+                                        src.sendFeedback(() -> Text.literal(
+                                            "✔ Spotify authorized! Private playlists are now accessible."), true);
+                                    } else {
+                                        src.sendFeedback(() -> Text.literal(
+                                            "⚠ Code exchange failed. Check spotifyClientId / spotifyClientSecret."), false);
+                                    }
+                                }));
+                        });
+                        int port = cfg.spotifyOAuthPort;
+                        src.sendFeedback(() -> Text.literal(
+                            "Open this URL in a browser ON THIS MACHINE:\n" + authUrl
+                            + "\n\nMake sure \"http://127.0.0.1:" + port + "/callback\" is listed as a"
+                            + " Redirect URI in your Spotify app settings."
+                            + "\nWaiting up to 2 minutes for the callback..."), false);
+                        return 1;
+                    })
+                )
+
+                // /music spotify code <code>
+                // Manual fallback: if the browser redirect didn't land on the local server
+                // (e.g. the server is remote), the user can copy the ?code= value from the
+                // redirect URL and paste it here.
+                .then(literal("code")
+                    .then(argument("code", StringArgumentType.greedyString())
+                        .executes(ctx -> {
+                            MusicConfig cfg = MusicConfig.get();
+                            if (!cfg.hasSpotifyCredentials()) {
+                                ctx.getSource().sendError(Text.literal(
+                                    "Set spotifyClientId and spotifyClientSecret in musicmod.json first."));
+                                return 0;
+                            }
+                            String code = StringArgumentType.getString(ctx, "code");
+                            ServerCommandSource src = ctx.getSource();
+                            CompletableFuture.supplyAsync(() ->
+                                    LinkResolver.get().exchangeSpotifyAuthCode(code, cfg))
+                                .thenAccept(token -> src.getServer().execute(() -> {
+                                    if (token != null) {
+                                        src.sendFeedback(() -> Text.literal(
+                                            "✔ Spotify authorized! Private playlists are now accessible."), true);
+                                    } else {
+                                        src.sendFeedback(() -> Text.literal(
+                                            "⚠ Code exchange failed. Check credentials and try again."), false);
+                                    }
+                                }));
+                            src.sendFeedback(() -> Text.literal("⏳ Exchanging Spotify auth code..."), false);
+                            return 1;
+                        })
+                    )
+                )
+
+                // /music spotify status
+                .then(literal("status")
+                    .executes(ctx -> {
+                        MusicConfig cfg = MusicConfig.get();
+                        String msg;
+                        if (!cfg.hasSpotifyCredentials()) {
+                            msg = "✗ No Spotify app credentials (spotifyClientId / spotifyClientSecret missing).";
+                        } else if (!cfg.spotifyRefreshToken.isBlank()) {
+                            msg = "✔ Spotify authorized (refresh token present). Private playlists accessible.";
+                        } else {
+                            msg = "⚠ Spotify app credentials set, but not authorized for private playlists.\n"
+                                + "Run /music spotify auth to enable private playlist access.";
+                        }
+                        ctx.getSource().sendFeedback(() -> Text.literal(msg), false);
+                        return 1;
+                    })
                 )
             )
 

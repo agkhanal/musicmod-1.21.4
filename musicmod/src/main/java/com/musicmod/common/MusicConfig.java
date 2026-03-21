@@ -38,6 +38,20 @@ public class MusicConfig {
     public String spotifyClientSecret = "";
 
     /**
+     * Spotify OAuth refresh token — obtained via /music spotify auth.
+     * When set, private playlists become accessible.
+     * The token is stored here automatically after completing the auth flow.
+     */
+    public String spotifyRefreshToken = "";
+
+    /**
+     * Local port used for the temporary OAuth callback server during /music spotify auth.
+     * You must register "http://127.0.0.1:<port>/callback" as a redirect URI in your
+     * Spotify Developer Dashboard app settings.
+     */
+    public int spotifyOAuthPort = 8888;
+
+    /**
      * How long (seconds) to cache a resolved audio URL before re-resolving.
      * YouTube CDN URLs expire after ~6 hours, so 21000 is a safe default.
      */
@@ -67,9 +81,11 @@ public class MusicConfig {
             JsonObject obj = JsonParser.parseString(Files.readString(CONFIG_PATH))
                     .getAsJsonObject();
             if (obj.has("ytDlpPath"))            ytDlpPath            = obj.get("ytDlpPath").getAsString();
-            if (obj.has("ffmpegPath")) ffmpegPath = obj.get("ffmpegPath").getAsString();
+            if (obj.has("ffmpegPath"))           ffmpegPath           = obj.get("ffmpegPath").getAsString();
             if (obj.has("spotifyClientId"))      spotifyClientId      = obj.get("spotifyClientId").getAsString();
             if (obj.has("spotifyClientSecret"))  spotifyClientSecret  = obj.get("spotifyClientSecret").getAsString();
+            if (obj.has("spotifyRefreshToken"))  spotifyRefreshToken  = obj.get("spotifyRefreshToken").getAsString();
+            if (obj.has("spotifyOAuthPort"))     spotifyOAuthPort     = obj.get("spotifyOAuthPort").getAsInt();
             if (obj.has("urlCacheTtlSeconds"))   urlCacheTtlSeconds   = obj.get("urlCacheTtlSeconds").getAsInt();
             if (obj.has("resolveTimeoutSeconds"))resolveTimeoutSeconds= obj.get("resolveTimeoutSeconds").getAsInt();
             if (obj.has("ytDlpFormat"))          ytDlpFormat          = obj.get("ytDlpFormat").getAsString();
@@ -86,6 +102,8 @@ public class MusicConfig {
             obj.addProperty("ytDlpPath", ytDlpPath);
             obj.addProperty("spotifyClientId", spotifyClientId);
             obj.addProperty("spotifyClientSecret", spotifyClientSecret);
+            obj.addProperty("spotifyRefreshToken", spotifyRefreshToken);
+            obj.addProperty("spotifyOAuthPort", spotifyOAuthPort);
             obj.addProperty("urlCacheTtlSeconds", urlCacheTtlSeconds);
             obj.addProperty("resolveTimeoutSeconds", resolveTimeoutSeconds);
             obj.addProperty("ytDlpFormat", ytDlpFormat);
