@@ -391,11 +391,16 @@ public class MusicCommands {
                                 }));
                         });
                         int port = cfg.spotifyOAuthPort;
+                        String redirectUri = "http://127.0.0.1:" + port + "/callback";
                         src.sendFeedback(() -> Text.literal(
-                            "Open this URL in a browser ON THIS MACHINE:\n" + authUrl
-                            + "\n\nMake sure \"http://127.0.0.1:" + port + "/callback\" is listed as a"
-                            + " Redirect URI in your Spotify app settings."
-                            + "\nWaiting up to 2 minutes for the callback..."), false);
+                            "=== Spotify Auth ===\n"
+                            + "Redirect URI registered in your Spotify app MUST be exactly:\n"
+                            + redirectUri + "\n\n"
+                            + "Open this URL in a browser on this machine:\n"
+                            + authUrl
+                            + "\n\nIf Spotify shows 'redirect_uri: Not matching', "
+                            + "make sure you clicked SAVE (not just Add) in your Spotify Dashboard.\n"
+                            + "Waiting up to 2 minutes..."), false);
                         return 1;
                     })
                 )
