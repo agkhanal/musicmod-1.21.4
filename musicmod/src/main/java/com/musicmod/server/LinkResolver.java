@@ -53,6 +53,10 @@ public class LinkResolver {
         return t;
     });
 
+    // In-memory access token cache — avoids redundant token requests
+    private volatile String cachedAccessToken = null;
+    private volatile long   tokenExpiry        = 0;
+
     private LinkResolver() {}
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -578,20 +582,184 @@ public class LinkResolver {
     }
 
     private String getSpotifyAccessToken(MusicConfig cfg) {
+        // Return cached token if still valid (with 60-second buffer)
+        if (cachedAccessToken != null && System.currentTimeMillis() < tokenExpiry - 60_000L) {
+            return cachedAccessToken;
+        }
         try {
-            String credentials = cfg.spotifyClientId + ":" + cfg.spotifyClientSecret;
-            String encoded = Base64.getEncoder().encodeToString(credentials.getBytes());
-            HttpURLConnection conn = (HttpURLConnection)
-                    new URL("https://accounts.spotify.com/api/token").openConnection();
-            conn.setRequestMethod("POST");
-            conn.setDoOutput(true);
-            conn.setRequestProperty("Authorization", "Basic " + encoded);
-            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-            conn.getOutputStream().write("grant_type=client_credentials".getBytes());
-            String tokenJson = new String(conn.getInputStream().readAllBytes());
-            return extractJsonField(tokenJson, "access_token");
+            // Prefer refresh token — works for private playlists and doesn't expire
+            if (!cfg.spotifyRefreshToken.isBlank()) {
+                return refreshAccessToken(cfg);
+            }
+            // Fall back to client credentials (public playlists only)
+            if (cfg.hasSpotifyCredentials()) {
+                return fetchClientCredentialsToken(cfg);
+            }
+            return null;
         } catch (Exception e) {
             LOGGER.error("Failed to get Spotify access token: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private String refreshAccessToken(MusicConfig cfg) throws Exception {
+        String body = "grant_type=refresh_token&refresh_token="
+                + URLEncoder.encode(cfg.spotifyRefreshToken, "UTF-8");
+        JsonObject resp = postSpotifyTokenRequest(cfg, body);
+        if (resp == null || !resp.has("access_token")) {
+            LOGGER.error("Refresh token flow failed — falling back to client credentials.");
+            return cfg.hasSpotifyCredentials() ? fetchClientCredentialsToken(cfg) : null;
+        }
+        // Spotify sometimes rotates the refresh token
+        if (resp.has("refresh_token") && !resp.get("refresh_token").isJsonNull()) {
+            String newRefresh = resp.get("refresh_token").getAsString();
+            if (!newRefresh.isBlank()) { cfg.spotifyRefreshToken = newRefresh; cfg.save(); }
+        }
+        int ttl = resp.has("expires_in") ? resp.get("expires_in").getAsInt() : 3600;
+        String token = resp.get("access_token").getAsString();
+        cacheToken(token, ttl);
+        return token;
+    }
+
+    private String fetchClientCredentialsToken(MusicConfig cfg) throws Exception {
+        JsonObject resp = postSpotifyTokenRequest(cfg, "grant_type=client_credentials");
+        if (resp == null || !resp.has("access_token")) return null;
+        int ttl = resp.has("expires_in") ? resp.get("expires_in").getAsInt() : 3600;
+        String token = resp.get("access_token").getAsString();
+        cacheToken(token, ttl);
+        return token;
+    }
+
+    private JsonObject postSpotifyTokenRequest(MusicConfig cfg, String bodyStr) throws Exception {
+        String credentials = cfg.spotifyClientId + ":" + cfg.spotifyClientSecret;
+        String encoded = Base64.getEncoder().encodeToString(credentials.getBytes());
+        HttpURLConnection conn = (HttpURLConnection)
+                new URL("https://accounts.spotify.com/api/token").openConnection();
+        conn.setRequestMethod("POST");
+        conn.setDoOutput(true);
+        conn.setConnectTimeout(8000);
+        conn.setReadTimeout(8000);
+        conn.setRequestProperty("Authorization", "Basic " + encoded);
+        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+        conn.getOutputStream().write(bodyStr.getBytes());
+        int code = conn.getResponseCode();
+        InputStream is = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
+        if (is == null) return null;
+        String json = new String(is.readAllBytes());
+        try { return JsonParser.parseString(json).getAsJsonObject(); }
+        catch (Exception e) { LOGGER.error("Could not parse token response: {}", json); return null; }
+    }
+
+    private void cacheToken(String token, int expiresInSeconds) {
+        cachedAccessToken = token;
+        tokenExpiry = System.currentTimeMillis() + expiresInSeconds * 1000L;
+    }
+
+    // ── Spotify OAuth (Authorization Code flow) ───────────────────────────────
+
+    /**
+     * Builds the Spotify authorization URL the user must open in a browser.
+     * Includes the playlist-read-private scope so private playlists are accessible.
+     * The redirect_uri must be registered in the user's Spotify Developer Dashboard.
+     */
+    public String generateSpotifyAuthUrl(MusicConfig cfg) {
+        try {
+            String redirectUri = "http://127.0.0.1:" + cfg.spotifyOAuthPort + "/callback";
+            return "https://accounts.spotify.com/authorize"
+                    + "?client_id=" + URLEncoder.encode(cfg.spotifyClientId, "UTF-8")
+                    + "&response_type=code"
+                    + "&redirect_uri=" + URLEncoder.encode(redirectUri, "UTF-8")
+                    + "&scope=" + URLEncoder.encode(
+                            "playlist-read-private playlist-read-collaborative", "UTF-8");
+        } catch (Exception e) {
+            LOGGER.error("Failed to build Spotify auth URL: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Starts a temporary HTTP server on 127.0.0.1:<cfg.spotifyOAuthPort> that waits for
+     * Spotify's OAuth redirect, extracts the authorization code, sends a success page, and
+     * calls onCode with the code (or null on failure/timeout).
+     * The server accepts one connection then exits.
+     */
+    public void startOAuthCallbackServer(MusicConfig cfg,
+                                         java.util.function.Consumer<String> onCode) {
+        int port = cfg.spotifyOAuthPort;
+        Thread t = new Thread(() -> {
+            try (java.net.ServerSocket srv = new java.net.ServerSocket(
+                    port, 1, java.net.InetAddress.getByName("127.0.0.1"))) {
+                srv.setSoTimeout(120_000); // 2-minute window to complete auth
+                LOGGER.info("Waiting for Spotify OAuth callback on http://127.0.0.1:{}/callback", port);
+                try (java.net.Socket sock = srv.accept()) {
+                    java.io.BufferedReader rdr = new java.io.BufferedReader(
+                            new java.io.InputStreamReader(sock.getInputStream()));
+                    String line = rdr.readLine(); // "GET /callback?code=XXX HTTP/1.1"
+                    String code = null;
+                    if (line != null && line.startsWith("GET ")) {
+                        String path = line.split(" ")[1];
+                        int q = path.indexOf('?');
+                        if (q >= 0) {
+                            for (String param : path.substring(q + 1).split("&")) {
+                                if (param.startsWith("code=")) {
+                                    code = URLDecoder.decode(
+                                            param.substring(5), "UTF-8");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    String html = code != null
+                            ? "<html><body><h2>Authorized! You can close this tab.</h2></body></html>"
+                            : "<html><body><h2>Error: no code received.</h2></body></html>";
+                    String resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+                            + "Content-Length: " + html.length() + "\r\nConnection: close\r\n\r\n" + html;
+                    sock.getOutputStream().write(resp.getBytes());
+                    sock.getOutputStream().flush();
+                    onCode.accept(code);
+                }
+            } catch (java.net.SocketTimeoutException e) {
+                LOGGER.warn("Spotify OAuth server timed out (2 min).");
+                onCode.accept(null);
+            } catch (Exception e) {
+                LOGGER.error("OAuth callback server error: {}", e.getMessage());
+                onCode.accept(null);
+            }
+        }, "musicmod-oauth-server");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * Exchanges a Spotify authorization code for an access + refresh token.
+     * Saves the refresh token to config for future use.
+     * Returns the access token, or null on failure.
+     */
+    public String exchangeSpotifyAuthCode(String code, MusicConfig cfg) {
+        try {
+            String redirectUri = "http://127.0.0.1:" + cfg.spotifyOAuthPort + "/callback";
+            String body = "grant_type=authorization_code"
+                    + "&code=" + URLEncoder.encode(code, "UTF-8")
+                    + "&redirect_uri=" + URLEncoder.encode(redirectUri, "UTF-8");
+            JsonObject resp = postSpotifyTokenRequest(cfg, body);
+            if (resp == null || !resp.has("access_token")) {
+                LOGGER.error("Code exchange returned no access_token: {}", resp);
+                return null;
+            }
+            String accessToken = resp.get("access_token").getAsString();
+            if (resp.has("refresh_token") && !resp.get("refresh_token").isJsonNull()) {
+                String refreshToken = resp.get("refresh_token").getAsString();
+                if (!refreshToken.isBlank()) {
+                    cfg.spotifyRefreshToken = refreshToken;
+                    cfg.save();
+                    LOGGER.info("Spotify refresh token saved — private playlists now accessible.");
+                }
+            }
+            int ttl = resp.has("expires_in") ? resp.get("expires_in").getAsInt() : 3600;
+            cacheToken(accessToken, ttl);
+            return accessToken;
+        } catch (Exception e) {
+            LOGGER.error("Spotify code exchange failed: {}", e.getMessage());
             return null;
         }
     }
