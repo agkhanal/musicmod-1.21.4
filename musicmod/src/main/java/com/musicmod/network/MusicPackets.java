@@ -6,6 +6,8 @@ import net.minecraft.network.codec.PacketCodecs;
 import net.minecraft.network.packet.CustomPayload;
 import net.minecraft.util.Identifier;
 
+import java.nio.charset.StandardCharsets;
+
 /**
  * All custom network payloads for 1.21.4.
  */
@@ -49,13 +51,22 @@ public class MusicPackets {
     }
 
     // ── S2C: Full state sync JSON for GUI ─────────────────────────────────────────
+    // Uses raw UTF-8 bytes instead of PacketCodecs.STRING to avoid the 32767-byte cap.
+    // Minecraft's custom payload limit is 1 MB, which is sufficient for any library size.
     public record SyncStatePayload(String json) implements CustomPayload {
         public static final Id<SyncStatePayload> ID =
                 new Id<>(Identifier.of("musicmod", "sync_state"));
         public static final PacketCodec<PacketByteBuf, SyncStatePayload> CODEC =
-                PacketCodec.tuple(
-                        PacketCodecs.STRING, SyncStatePayload::json,
-                        SyncStatePayload::new);
+                new PacketCodec<>() {
+                    @Override
+                    public SyncStatePayload decode(PacketByteBuf buf) {
+                        return new SyncStatePayload(new String(buf.readByteArray(), StandardCharsets.UTF_8));
+                    }
+                    @Override
+                    public void encode(PacketByteBuf buf, SyncStatePayload value) {
+                        buf.writeByteArray(value.json().getBytes(StandardCharsets.UTF_8));
+                    }
+                };
         @Override public Id<SyncStatePayload> getId() { return ID; }
     }
 
