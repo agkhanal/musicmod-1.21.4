@@ -15,7 +15,10 @@ import java.io.*;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 public class PlaylistManager {
 
@@ -23,6 +26,12 @@ public class PlaylistManager {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Path SAVE_PATH = FabricLoader.getInstance()
             .getConfigDir().resolve("musicmod_playlists.json");
+
+    /**
+     * Dedicated thread pool for background resolution on startup.
+     * Limits concurrent yt-dlp processes so we don't overwhelm the server.
+     */
+    private static final ExecutorService BG_RESOLVE_POOL = Executors.newFixedThreadPool(3);
 
     private static PlaylistManager instance;
     public static PlaylistManager get() {
@@ -40,6 +49,41 @@ public class PlaylistManager {
     private PlaylistManager() { load(); }
 
     public void setServer(MinecraftServer s) { this.server = s; }
+
+    /**
+     * Background-resolve every song in the library that needs it.
+     * Called on server start so players don't see everything greyed-out after a reload.
+     * Uses a limited thread pool (3 threads) to avoid spawning too many yt-dlp processes.
+     * Each resolved song triggers a syncToAll() so the UI updates progressively.
+     */
+    public void resolveAllAsync() {
+        int ttl = MusicConfig.get().urlCacheTtlSeconds;
+        List<Playlist.Song> toResolve;
+        synchronized (this) {
+            toResolve = library.values().stream()
+                    .filter(s -> s.needsResolution() && !s.isResolved(ttl))
+                    .collect(Collectors.toList());
+        }
+        if (toResolve.isEmpty()) return;
+        LOGGER.info("Background-resolving {} unresolved songs...", toResolve.size());
+
+        AtomicInteger done = new AtomicInteger(0);
+        int total = toResolve.size();
+        for (Playlist.Song song : toResolve) {
+            CompletableFuture.supplyAsync(() -> LinkResolver.get().resolve(song), BG_RESOLVE_POOL)
+                .thenAccept(ok -> {
+                    int n = done.incrementAndGet();
+                    if (server != null) {
+                        server.execute(() -> {
+                            save();
+                            syncToAll();
+                            if (n == total)
+                                LOGGER.info("Background resolution complete ({}/{} resolved).", n, total);
+                        });
+                    }
+                });
+        }
+    }
 
     // ── Song management ───────────────────────────────────────────────────────
 
