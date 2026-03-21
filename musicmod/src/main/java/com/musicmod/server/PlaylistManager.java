@@ -43,7 +43,14 @@ public class PlaylistManager {
 
     // ── Song management ───────────────────────────────────────────────────────
 
+    /** Convenience overload without a pre-fetched display name. */
     public synchronized void addSongAsync(String url, String optionalPlaylist,
+                             ServerPlayerEntity requester,
+                             java.util.function.Consumer<String> onComplete) {
+        addSongAsync(url, null, optionalPlaylist, requester, onComplete);
+    }
+
+    public synchronized void addSongAsync(String url, String initialName, String optionalPlaylist,
                              ServerPlayerEntity requester,
                              java.util.function.Consumer<String> onComplete) {
         // Use sourceUrl as the stable map key so order never changes after resolution
@@ -59,7 +66,10 @@ public class PlaylistManager {
             return;
         }
 
-        String placeholder = LinkResolver.placeholderName(url);
+        // Use the pre-fetched name if provided, otherwise generate a placeholder.
+        // This means Spotify imports show "Artist - Title" immediately instead of "spot:ID".
+        String placeholder = (initialName != null && !initialName.isBlank())
+                ? initialName : LinkResolver.placeholderName(url);
         Playlist.Song song = new Playlist.Song(placeholder, url);
         library.put(url, song);
         if (optionalPlaylist != null) {
@@ -112,14 +122,14 @@ public class PlaylistManager {
         CompletableFuture.supplyAsync(() -> {
             MusicConfig cfg = MusicConfig.get();
             String playlistName = LinkResolver.get().getPlaylistTitle(playlistUrl, cfg);
-            List<String> trackUrls = LinkResolver.get().extractPlaylistUrls(playlistUrl, cfg);
-            return new Object[]{ playlistName, trackUrls };
+            List<LinkResolver.TrackEntry> entries = LinkResolver.get().extractPlaylistEntries(playlistUrl, cfg);
+            return new Object[]{ playlistName, entries };
         }).thenAccept(result -> {
             String playlistName = (String) result[0];
             @SuppressWarnings("unchecked")
-            List<String> trackUrls = (List<String>) result[1];
+            List<LinkResolver.TrackEntry> entries = (List<LinkResolver.TrackEntry>) result[1];
 
-            if (trackUrls.isEmpty()) {
+            if (entries.isEmpty()) {
                 onStatus.accept("\u26a0 No tracks found. Check the URL or credentials.");
                 return;
             }
@@ -127,12 +137,12 @@ public class PlaylistManager {
             if (server != null) {
                 server.execute(() -> {
                     createPlaylist(playlistName);
-                    onStatus.accept("\u23f3 Importing " + trackUrls.size()
+                    onStatus.accept("\u23f3 Importing " + entries.size()
                             + " tracks into \u201c" + playlistName + "\u201d\u2026");
                     AtomicInteger counter = new AtomicInteger(0);
-                    int total = trackUrls.size();
-                    for (String trackUrl : trackUrls) {
-                        addSongAsync(trackUrl, playlistName, requester, msg -> {
+                    int total = entries.size();
+                    for (LinkResolver.TrackEntry entry : entries) {
+                        addSongAsync(entry.url(), entry.name(), playlistName, requester, msg -> {
                             if (counter.incrementAndGet() == total) {
                                 onStatus.accept("\u2714 Import complete: " + total
                                         + " tracks added to \u201c" + playlistName + "\u201d");
@@ -239,6 +249,14 @@ public class PlaylistManager {
         boolean ok = p.moveSong(fromIndex, toIndex);
         if (ok) save();
         return ok;
+    }
+
+    public synchronized boolean toggleShuffle(String name) {
+        Playlist p = getPlaylist(name);
+        if (p == null) return false;
+        p.setShuffle(!p.isShuffle());
+        save();
+        return true;
     }
 
     public synchronized void clearPlaylist(String name) {

@@ -170,6 +170,19 @@ public class MusicServerMod implements ModInitializer {
                 }
             }
 
+            case "shuffle_toggle" -> {
+                boolean ok = pm.toggleShuffle(arg);
+                if (ok) {
+                    Playlist pl = pm.getPlaylist(arg);
+                    PlaylistManager.sendFeedback(player, pl != null && pl.isShuffle()
+                            ? "\ud83d\udd00 Shuffle ON for: " + arg
+                            : "\u27a1 Shuffle OFF for: " + arg);
+                    pm.syncToAll();
+                } else {
+                    PlaylistManager.sendFeedback(player, "\u26a0 Playlist not found: " + arg);
+                }
+            }
+
             case "clear_playlist" -> {
                 pm.clearPlaylist(arg);
                 PlaylistManager.sendFeedback(player, "\u2714 Cleared all songs from: " + arg);
