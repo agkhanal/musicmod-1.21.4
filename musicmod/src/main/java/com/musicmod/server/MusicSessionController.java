@@ -104,6 +104,10 @@ public class MusicSessionController {
             broadcastPlay(song.getDisplayName(), song.getPlaybackUrl(), song.getDurationSeconds());
             return;
         }
+        // Stop current audio immediately so the old song doesn't keep playing while we resolve.
+        // Increment songSeq now so any in-flight song_finished from the old song is ignored.
+        songSeq.incrementAndGet();
+        broadcastStop();
         broadcastChat("\u23f3 Resolving: " + song.getDisplayName() + "\u2026");
         CompletableFuture.supplyAsync(() -> LinkResolver.get().resolve(song))
             .thenAccept(ok -> {

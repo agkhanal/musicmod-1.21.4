@@ -20,7 +20,8 @@ public class MusicClientMod implements ClientModInitializer {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("musicmod/client");
     private static KeyBinding openGuiKey;
-    private static MusicScreen openScreen = null;
+    private static MusicScreen openScreen    = null;
+    private static String      cachedSyncJson = null;
 
     @Override
     public void onInitializeClient() {
@@ -61,6 +62,7 @@ public class MusicClientMod implements ClientModInitializer {
 
         ClientPlayNetworking.registerGlobalReceiver(MusicPackets.SyncStatePayload.ID,
             (payload, context) -> context.client().execute(() -> {
+                cachedSyncJson = payload.json();
                 if (openScreen != null) openScreen.applySync(payload.json());
             }));
 
@@ -74,6 +76,7 @@ public class MusicClientMod implements ClientModInitializer {
             client.execute(() -> {
                 MusicPlayer.get().stop();
                 MusicHudRenderer.get().clear();
+                cachedSyncJson = null;
                 LOGGER.info("Disconnected from server — stopped music.");
             });
         });
@@ -81,10 +84,18 @@ public class MusicClientMod implements ClientModInitializer {
         // ── Tick ─────────────────────────────────────────────────────────────────
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             MusicHudRenderer.get().tick();
+            // Belt-and-suspenders: stop music if we are no longer in a world
+            // (covers edge cases where DISCONNECT doesn't fire, e.g. single-player exit).
+            if (client.world == null && MusicPlayer.get().isPlaying()) {
+                MusicPlayer.get().stop();
+                MusicHudRenderer.get().clear();
+            }
             if (openGuiKey.wasPressed() && client.currentScreen == null) {
                 MusicScreen screen = new MusicScreen();
                 openScreen = screen;
                 client.setScreen(screen);
+                // Apply cached state immediately so the UI isn't blank while waiting for sync.
+                if (cachedSyncJson != null) screen.applySync(cachedSyncJson);
                 ClientPlayNetworking.send(new MusicPackets.RequestSyncPayload());
             }
             if (openScreen != null && client.currentScreen != openScreen) openScreen = null;

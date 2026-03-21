@@ -43,8 +43,10 @@ public class MusicServerMod implements ModInitializer {
             LOGGER.info("ServerMusicPlayer ready. yt-dlp: {}", MusicConfig.get().ytDlpPath);
         });
 
-        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) ->
-            MusicSessionController.get().syncToPlayer(handler.player));
+        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
+            MusicSessionController.get().syncToPlayer(handler.player);
+            PlaylistManager.get().syncToPlayer(handler.player);
+        });
 
         // ── C2S: add song ─────────────────────────────────────────────────────────
         ServerPlayNetworking.registerGlobalReceiver(MusicPackets.AddSongPayload.ID,
